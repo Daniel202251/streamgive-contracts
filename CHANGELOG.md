@@ -69,5 +69,10 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `donation-vault`: `create_stream` rejects a stream whose `donor` and `ngo`
   are the same address with `Error::SelfStream`, so a deposit can't be
   counted as a committed donation while streaming straight back to its donor.
+- Both contracts migrated event declarations from deprecated
+  `Events::publish` to explicit `#[contractevent]` types. Topic names and
+  positional payload formats are declared in code and documented in
+  `docs/EVENTS.md`; consumers should update to the generated event types
+  before the next contract release.
 
 [Unreleased]: https://github.com/StreamGive/streamgive-contracts/compare/main...HEAD

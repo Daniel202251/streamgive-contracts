@@ -1,17 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
-// soroban-sdk 27 deprecates Events::publish in favour of the
-// #[contractevent] macro. Migrating is not a lint cleanup: #[contractevent]
-// derives its own topic/data layout, and streamgive-backend's indexer
-// decodes the current layout by hand (topic[0] = symbol, topic[1] = id),
-// as does docs/EVENTS.md. Both repos have to move in the same change, so
-// it is tracked as its own issue rather than done under -D warnings here.
-#![allow(deprecated)]
-
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
     Address, BytesN, Env, Map, String, Vec,
+    contractevent,
 };
+
+#[contractevent(topics = ["propadmin"], data_format = "single-value")]
+pub struct ProposedAdminEvent {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["acptadmin"], data_format = "single-value")]
+pub struct AcceptedAdminEvent {
+    pub admin: Address,
+}
+
+#[contractevent(topics = ["canceladm"], data_format = "single-value")]
+pub struct CancelledAdminEvent {
+    pub data: (),
+}
+
+#[contractevent(topics = ["pause"], data_format = "single-value")]
+pub struct PausedEvent {
+    pub data: (),
+}
+
+#[contractevent(topics = ["unpause"], data_format = "single-value")]
+pub struct UnpausedEvent {
+    pub data: (),
+}
+
+#[contractevent(topics = ["created"], data_format = "vec")]
+pub struct CreatedEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub donor: Address,
+    pub ngo: Address,
+    pub token: Address,
+    pub deposit: i128,
+    pub rate: i128,
+}
+
+#[contractevent(topics = ["withdraw"], data_format = "single-value")]
+pub struct WithdrawnEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub accrued: i128,
+}
+
+#[contractevent(topics = ["cancel"], data_format = "vec")]
+pub struct CancelledStreamEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub accrued: i128,
+    pub refund: i128,
+}
+
+#[contractevent(topics = ["topup"], data_format = "single-value")]
+pub struct ToppedUpEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["ratemod"], data_format = "single-value")]
+pub struct RateModifiedEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub new_rate: i128,
+}
 
 mod math;
 
@@ -528,8 +586,7 @@ impl DonationVault {
             .set(&DataKey::PendingAdmin, &new_admin);
         extend_instance_ttl(&env);
 
-        env.events()
-            .publish((symbol_short!("propadmin"),), new_admin);
+        ProposedAdminEvent { admin: new_admin }.publish(&env);
 
         Ok(())
     }
@@ -564,7 +621,7 @@ impl DonationVault {
         env.storage().instance().remove(&DataKey::PendingAdmin);
         extend_instance_ttl(&env);
 
-        env.events().publish((symbol_short!("acptadmin"),), pending);
+        AcceptedAdminEvent { admin: pending }.publish(&env);
 
         Ok(())
     }
@@ -601,7 +658,7 @@ impl DonationVault {
         env.storage().instance().remove(&DataKey::PendingAdmin);
         extend_instance_ttl(&env);
 
-        env.events().publish((symbol_short!("canceladm"),), ());
+        CancelledAdminEvent { data: () }.publish(&env);
 
         Ok(())
     }
@@ -994,7 +1051,7 @@ impl DonationVault {
         }
         env.storage().instance().set(&DataKey::Paused, &true);
         extend_instance_ttl(&env);
-        env.events().publish((symbol_short!("pause"),), ());
+        PausedEvent { data: () }.publish(&env);
         Ok(())
     }
 
@@ -1027,7 +1084,7 @@ impl DonationVault {
         }
         env.storage().instance().set(&DataKey::Paused, &false);
         extend_instance_ttl(&env);
-        env.events().publish((symbol_short!("unpause"),), ());
+        UnpausedEvent { data: () }.publish(&env);
         Ok(())
     }
 
@@ -1611,10 +1668,15 @@ impl DonationVault {
         extend_instance_ttl(&env);
         extend_stream_ttl(&env, stream_id, rate, deposit);
 
-        env.events().publish(
-            (symbol_short!("created"), stream_id),
-            (donor, ngo, token, deposit, rate),
-        );
+        CreatedEvent {
+            stream_id,
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+        }
+        .publish(&env);
 
         Ok(stream_id)
     }
@@ -1687,8 +1749,7 @@ impl DonationVault {
         let token_client = token::Client::new(&env, &stream.token);
         let net = pay_ngo(&env, &token_client, &stream.ngo, accrued);
 
-        env.events()
-            .publish((symbol_short!("withdraw"), stream_id), accrued);
+        WithdrawnEvent { stream_id, accrued }.publish(&env);
 
         Ok(net)
     }
@@ -2065,8 +2126,7 @@ impl DonationVault {
         }
         token_client.transfer(&stream.donor, env.current_contract_address(), &amount);
 
-        env.events()
-            .publish((symbol_short!("topup"), stream_id), amount);
+        ToppedUpEvent { stream_id, amount }.publish(&env);
 
         Ok(())
     }
