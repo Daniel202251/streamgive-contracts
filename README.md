@@ -99,6 +99,8 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 2    | `NotInitialized`      | `init` has not been called yet, so there is no admin to act as.  |
 | 3    | `AlreadyRegistered`   | `register` was called for an address that already has an entry. |
 | 4    | `NotRegistered`       | No registry entry exists for the given owner address.            |
+| 5    | `AlreadyVerified`     | An approved NGO cannot change its name.                         |
+| 6    | `NoPendingAdmin`      | `accept_admin` was called without a pending admin proposal.     |
 
 ## Status
 

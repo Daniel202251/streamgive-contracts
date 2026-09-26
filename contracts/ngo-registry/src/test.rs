@@ -28,6 +28,50 @@ fn init_sets_admin() {
 }
 
 #[test]
+fn admin_transfer_completes_in_two_steps() {
+    let (env, client, old_admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+    assert_eq!(client.admin(), old_admin);
+    assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+    client.accept_admin();
+    assert_eq!(client.admin(), new_admin);
+    assert_eq!(client.pending_admin(), None);
+}
+
+#[test]
+fn accept_admin_without_proposal_fails() {
+    let (_env, client, _admin) = setup();
+
+    assert_eq!(client.try_accept_admin(), Err(Ok(Error::NoPendingAdmin)));
+}
+
+#[test]
+#[should_panic]
+fn old_admin_loses_access_after_transfer() {
+    let (env, client, old_admin) = setup();
+    let new_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &old_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "approve_ngo",
+            args: (&owner,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.approve_ngo(&owner);
+}
+
+#[test]
 fn double_init_fails() {
     let (_env, client, admin) = setup();
     let result = client.try_init(&admin);
@@ -212,6 +256,17 @@ fn update_name_changes_name_before_approval() {
     client.update_name(&owner, &fixed);
 
     assert_eq!(
+        env.events().all().filter_by_contract(&client.address),
+        soroban_sdk::vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("renamed"), owner.clone()).into_val(&env),
+                fixed.clone().into_val(&env),
+            )
+        ]
+    );
+    assert_eq!(
         client.get_ngo(&owner),
         Ngo {
             owner: owner.clone(),
@@ -220,9 +275,6 @@ fn update_name_changes_name_before_approval() {
         }
     );
 
-    let (_, topics, data) = env.events().all().last().unwrap();
-    assert_eq!(topics, (symbol_short!("renamed"), owner).into_val(&env));
-    assert_eq!(data, fixed.into_val(&env));
 }
 
 #[test]

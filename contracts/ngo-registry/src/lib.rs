@@ -25,6 +25,7 @@ pub struct Ngo {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     Ngo(Address),
 }
 
@@ -38,6 +39,7 @@ pub enum Error {
     NotRegistered = 4,
     /// The NGO has already been approved, so its name is locked.
     AlreadyVerified = 5,
+    NoPendingAdmin = 6,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -129,6 +131,42 @@ impl NgoRegistry {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)
+    }
+
+    /// Starts a two-step admin transfer by recording `new_admin` as pending.
+    /// Requires the current admin's auth; the current admin remains active
+    /// until `accept_admin` is called by the proposed address.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        extend_instance_ttl(&env);
+        env.events()
+            .publish((symbol_short!("propadmin"),), new_admin);
+        Ok(())
+    }
+
+    /// Reads the address proposed by `propose_admin`, if any.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Completes the admin transfer. Requires the proposed admin's auth.
+    pub fn accept_admin(env: Env) -> Result<(), Error> {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NoPendingAdmin)?;
+        pending.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        extend_instance_ttl(&env);
+        env.events()
+            .publish((symbol_short!("acptadmin"),), pending);
+        Ok(())
     }
 
     /// Submits an NGO application. Callable by the NGO's own address.
