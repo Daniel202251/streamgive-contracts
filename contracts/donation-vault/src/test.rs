@@ -2,9 +2,7 @@
 
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
-use soroban_sdk::testutils::{
-    Address as _, AuthorizedFunction, Ledger, MockAuth, MockAuthInvoke,
-};
+use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Ledger, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{IntoVal, Symbol, Val, Vec};
 
@@ -84,7 +82,13 @@ fn full_lifecycle_create_accrue_withdraw_cancel() {
         last_event(&s.env),
         (
             (symbol_short!("created"), stream_id).into_val(&s.env),
-            (s.donor.clone(), s.ngo.clone(), s.token.address.clone(), 1_000i128, 10i128)
+            (
+                s.donor.clone(),
+                s.ngo.clone(),
+                s.token.address.clone(),
+                1_000i128,
+                10i128
+            )
                 .into_val(&s.env),
         )
     );
