@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Events as _, Ledger};
-use soroban_sdk::{IntoVal, Symbol};
+use soroban_sdk::{vec, IntoVal, Symbol};
 
 fn setup() -> (Env, NgoRegistryClient<'static>, Address) {
     let env = Env::default();
@@ -117,6 +117,85 @@ fn revoke_unregistered_ngo_fails() {
 }
 
 #[test]
+fn full_lifecycle_approve_revoke_reapprove() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let name = String::from_str(&env, "Red Cross");
+
+    // 1. Register NGO
+    client.register(&owner, &name);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("register"), owner.clone()).into_val(&env),
+                name.clone().into_val(&env),
+            ),
+        ]
+    );
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.owner, owner);
+    assert_eq!(ngo.name, name);
+    assert!(!ngo.verified);
+
+    // 2. Approve NGO
+    client.approve_ngo(&owner);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("approved"), owner.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.owner, owner);
+    assert_eq!(ngo.name, name);
+    assert!(ngo.verified);
+
+    // 3. Revoke NGO
+    client.revoke_ngo(&owner);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("revoked"), owner.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.owner, owner);
+    assert_eq!(ngo.name, name);
+    assert!(!ngo.verified);
+
+    // 4. Reapprove NGO
+    client.approve_ngo(&owner);
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("approved"), owner.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.owner, owner);
+    assert_eq!(ngo.name, name);
+    assert!(ngo.verified);
+}
+
+#[test]
 fn touch_ngo_leaves_entry_unchanged() {
     let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
@@ -212,6 +291,18 @@ fn update_name_changes_name_before_approval() {
     client.update_name(&owner, &fixed);
 
     assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("renamed"), owner.clone()).into_val(&env),
+                fixed.into_val(&env),
+            ),
+        ]
+    );
+
+    assert_eq!(
         client.get_ngo(&owner),
         Ngo {
             owner: owner.clone(),
@@ -219,10 +310,6 @@ fn update_name_changes_name_before_approval() {
             verified: false,
         }
     );
-
-    let (_, topics, data) = env.events().all().last().unwrap();
-    assert_eq!(topics, (symbol_short!("renamed"), owner).into_val(&env));
-    assert_eq!(data, fixed.into_val(&env));
 }
 
 #[test]
