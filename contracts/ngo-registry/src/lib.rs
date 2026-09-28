@@ -42,6 +42,8 @@ pub enum Error {
     AlreadyVerified = 5,
     /// `name` is longer than `MAX_NGO_NAME_LEN`.
     NameTooLong = 6,
+    /// `revoke_ngo` was called on an NGO that isn't currently verified.
+    NotVerified = 7,
 }
 
 /// Upper bound on `Ngo.name`, in bytes. Persistent storage cost scales with

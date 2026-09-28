@@ -51,6 +51,8 @@ pub enum DataKey {
     Treasury,
     FeeBps,
     MinDeposit,
+    /// Additional ledgers to retain a cancelled stream for indexing.
+    CancelGraceLedgers,
 }
 
 #[contracterror]
@@ -69,11 +71,24 @@ pub enum Error {
     /// leave its type's range. Returned instead of letting the release
     /// profile's overflow checks panic and abort the transaction.
     ArithmeticOverflow = 9,
+    /// The donor and the NGO are the same address, so the stream would pay
+    /// the donor back their own deposit. Rejected at creation: a stream that
+    /// nets to zero still counts as a committed donation in the indexer and
+    /// on impact pages, which is a way to inflate those totals for free.
+    SelfStream = 10,
     /// `set_treasury` was given the vault's own address. Fees paid there
     /// could never be moved out again.
-    InvalidTreasury = 10,
+    InvalidTreasury = 11,
+    AlreadyPaused = 12,
+    AlreadyUnpaused = 13,
     /// `deposit` was below the configured `min_deposit`.
-    DepositTooLow = 10,
+    DepositTooLow = 14,
+    /// `top_up` or `modify_rate` was called on a stream that `cancel_stream`
+    /// has already closed out. A cancelled stream's rate and balance are
+    /// zeroed for good; topping it up would just sit inert, and changing
+    /// its rate would quietly revive a stream the backend already treats
+    /// as terminal.
+    StreamCancelled = 15,
 }
 
 /// Fee cap of 10%, enforced by `set_fee_bps` so the admin can never take
@@ -884,6 +899,26 @@ impl DonationVault {
         env.storage()
             .instance()
             .get(&DataKey::MinDeposit)
+            .unwrap_or(0)
+    }
+
+    /// Sets the number of additional ledgers that a cancelled stream remains
+    /// available for indexing after the normal stream TTL bump. Admin-gated.
+    /// A value of zero preserves the default stream retention period.
+    pub fn set_cancel_grace_ledgers(env: Env, grace_ledgers: u32) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::CancelGraceLedgers, &grace_ledgers);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Reads the additional cancelled-stream retention period, in ledgers.
+    pub fn cancel_grace_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CancelGraceLedgers)
             .unwrap_or(0)
     }
 

@@ -1429,7 +1429,7 @@ fn pending_payout_with_no_treasury_returns_full_gross_and_zero_fee() {
     s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 accrues
 
     let (net, fee) = s.client.pending_payout(&stream_id);
-    assert_eq!(fee, 0);   // no treasury → no fee, regardless of fee_bps
+    assert_eq!(fee, 0); // no treasury → no fee, regardless of fee_bps
     assert_eq!(net, 500); // full accrual goes to the NGO
 
     // Read-only: nothing moved.
@@ -1454,7 +1454,7 @@ fn pending_payout_with_treasury_and_zero_bps_returns_full_gross_and_zero_fee() {
     s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 accrues
 
     let (net, fee) = s.client.pending_payout(&stream_id);
-    assert_eq!(fee, 0);   // 0 bps → zero fee even with a treasury set
+    assert_eq!(fee, 0); // 0 bps → zero fee even with a treasury set
     assert_eq!(net, 500);
 
     // Read-only: nothing moved.
@@ -1477,7 +1477,7 @@ fn pending_payout_with_nonzero_fee_matches_actual_withdraw_split() {
     s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 accrues
 
     let (net, fee) = s.client.pending_payout(&stream_id);
-    assert_eq!(fee, 25);  // 5% of 500
+    assert_eq!(fee, 25); // 5% of 500
     assert_eq!(net, 475); // 500 - 25
 
     // Read-only: nothing moved yet.
