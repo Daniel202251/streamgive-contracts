@@ -3,6 +3,9 @@
 Soroban smart contracts powering StreamGive, a recurring/streaming donation
 platform for verified NGOs on Stellar.
 
+For how these contracts fit with the backend and frontend — and how a
+donation flows end to end — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Contracts
 
 - `ngo-registry` — on-chain NGO application, verification, and registry
@@ -161,6 +164,13 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 10   | `InvalidTreasury`     | `set_treasury` was called with the vault's own address.                  |
 | 10   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`, which would stream the donor's own deposit back to them. |
 | 11   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 9    | `ArithmeticOverflow`  | A stream balance, withdrawn total, or stream ID would exceed its integer range. |
+| 10   | `DepositTooLow`       | `create_stream` was called with a deposit below the admin-configured minimum. |
+| 11   | `AlreadyPaused`       | `pause` was called when the vault was already paused. |
+| 12   | `AlreadyUnpaused`     | `unpause` was called when the vault was already active. |
+| 13   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`. |
+| 14   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 15   | `InvalidAdmin`        | `propose_admin` was called with the current admin instead of a different address. |
 
 ### `ngo-registry`
 
