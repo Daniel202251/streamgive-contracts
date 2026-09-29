@@ -9,12 +9,33 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
+    Address, BytesN, Env, String,
 };
 
 mod math;
 
-use ngo_registry::NgoRegistryClient;
+/// Mirrors ngo-registry's `Ngo` record for cross-contract calls. Declared
+/// locally rather than imported from the `ngo-registry` crate: depending on
+/// its source directly would pull that crate's own `#[contractimpl]` exports
+/// into this contract's Wasm link unit, colliding with this contract's
+/// identically-named entry points (`admin`, `init`, `upgrade`, ...).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct NgoRecord {
+    pub owner: Address,
+    pub name: String,
+    pub verified: bool,
+}
+
+/// Thin cross-contract interface onto the configured ngo-registry contract.
+/// Only the one method `create_stream` needs. See `NgoRecord` for why this
+/// isn't just imported from the `ngo-registry` crate.
+#[contractclient(name = "NgoRegistryClient")]
+#[allow(dead_code)]
+trait NgoRegistryInterface {
+    fn get_ngo(env: Env, owner: Address) -> NgoRecord;
+}
 
 /// A single donor -> NGO streaming donation.
 ///
@@ -79,7 +100,6 @@ pub enum DataKey {
     MinDeposit,
     /// Additional ledgers to retain a cancelled stream for indexing.
     CancelGraceLedgers,
-    CancelGraceLedgers,
     /// Optional NGO registry contract used to verify NGOs before a stream
     /// is opened. Absent means "no registry check configured".
     Registry,
@@ -119,18 +139,21 @@ pub enum Error {
     /// its rate would quietly revive a stream the backend already treats
     /// as terminal.
     StreamCancelled = 15,
-    DepositTooLow = 10,
-    AlreadyPaused = 11,
-    AlreadyUnpaused = 12,
-    /// The donor and the NGO are the same address, so the stream would pay
-    /// the donor back their own deposit. Rejected at creation: a stream that
-    /// nets to zero still counts as a committed donation in the indexer and
-    /// on impact pages, which is a way to inflate those totals for free.
-    SelfStream = 13,
-    /// The stream has already been cancelled and closed out.
-    StreamCancelled = 14,
     /// The proposed administrator is not a valid replacement.
-    InvalidAdmin = 15,
+    InvalidAdmin = 16,
+    /// The donor already has `max_streams_per_donor` streams. Raised by
+    /// `create_stream` before the deposit is pulled. See issue #94.
+    StreamLimitExceeded = 17,
+    /// The NGO address passed to `create_stream` is not verified in the
+    /// configured ngo-registry. Only set when a registry address has been
+    /// stored via `set_registry`.
+    NgoNotVerified = 18,
+    /// `NextStreamId` was missing from instance storage when `create_stream`
+    /// tried to read it. `init` always sets it, so this should be
+    /// unreachable in practice, but a missing counter must never be
+    /// silently treated as `0` — that could collide with an existing
+    /// stream. Returned instead of defaulting.
+    StreamCounterMissing = 19,
 }
 
 /// Fee cap of 10%, enforced by `set_fee_bps` so the admin can never take
@@ -956,10 +979,6 @@ impl DonationVault {
     /// A value of zero preserves the default stream retention period.
     pub fn set_cancel_grace_ledgers(env: Env, grace_ledgers: u32) -> Result<(), Error> {
         require_admin(&env)?;
-    /// Sets how many additional ledgers a cancelled stream remains available
-    /// for indexers after the normal stream-retention period. Admin-only.
-    pub fn set_cancel_grace_ledgers(env: Env, grace_ledgers: u32) -> Result<(), Error> {
-        require_admin(&env)?;
         STREAM_BUMP_AMOUNT
             .checked_add(grace_ledgers)
             .ok_or(Error::ArithmeticOverflow)?;
@@ -1001,8 +1020,7 @@ impl DonationVault {
             .instance()
             .set(&DataKey::MaxStreamsPerDonor, &limit);
         extend_instance_ttl(&env);
-        env.events()
-            .publish((symbol_short!("maxstrm"),), limit);
+        env.events().publish((symbol_short!("maxstrm"),), limit);
         Ok(())
     }
 
