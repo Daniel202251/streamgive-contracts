@@ -2,13 +2,13 @@
 
 Every event published by the contracts in this repo, with its topics and
 data shape, so an indexer can be written directly against this repo without
-going to `streamgive-docs` first.
+going to `streamgisve-docs` first.
 
 Soroban events have two parts:
 
 - **Topics** — a tuple, always starting with a `Symbol` naming the event.
   Topics are indexed/filterable.
-- **Data** — the event payload. Shown below as the Rust type(s) passed to
+- -- **Data** — the event payload. Shown below as the Rust type(s) passed to
   `env.events().publish((topics...), data)`. A single value publishes as
   itself; a tuple of values publishes as an XDR array in that order.
 
@@ -179,8 +179,7 @@ Emitted by `top_up` when a donor adds more funds to an existing stream.
 | Topics | `("topup", stream_id: u64)` |
 | Data | `amount: i128` |
 
-`amount` is only the newly added deposit. Any balance already accrued at
-the time of the top-up is settled to the NGO first (as its own implicit
+`amount` is only the newly added deposit. Any balance already accrued at the time of the top-up is settled to the NGO first (as its own implicit
 payout, without emitting a `withdraw` event) before the deposit is added.
 
 ### `ratemod`
@@ -197,6 +196,22 @@ As with `top_up`, any balance already accrued at the old rate is settled to
 the NGO first, so the new rate only ever applies going forward. The event
 records both values so an indexer can calculate the change without another
 state query.
+
+### `transfer`
+
+Emitted by `transfer_stream` when a donor reassigns an ongoing stream to a
+different NGO.
+
+| | |
+|---|---|
+| Topics | `("transfer", stream_id: u64)` |
+| Data | `(old_ngo: Address, new_ngo: Address)` |
+
+Anything accrued to the old NGO before the transfer is settled to it as
+part of the call (subject to the same protocol-fee split as `withdraw`),
+without emitting a separate `withdraw` event. After this event, future
+accrual goes to the `new_ngo` in `data`. The donor and the stream's balance
+and rate are unchanged.
 
 ### `unregist`
 
