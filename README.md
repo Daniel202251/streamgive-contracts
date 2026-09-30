@@ -5,6 +5,9 @@ platform for verified NGOs on Stellar.
 
 For how these contracts fit with the backend and frontend — and how a
 donation flows end to end — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For who these contracts defend against, what the admin can and cannot do, and
+which risks are knowingly accepted, see
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Contracts
 
