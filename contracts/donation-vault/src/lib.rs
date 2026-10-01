@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, token,
     Address, BytesN, Env, Map, String, Vec,
-    contractevent,
 };
 
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
@@ -64,11 +63,41 @@ pub struct ToppedUpEvent {
     pub amount: i128,
 }
 
-#[contractevent(topics = ["ratemod"], data_format = "single-value")]
+#[contractevent(topics = ["ratemod"], data_format = "vec")]
 pub struct RateModifiedEvent {
     #[topic]
     pub stream_id: u64,
+    pub old_rate: i128,
     pub new_rate: i128,
+}
+
+#[contractevent(topics = ["treasset"], data_format = "single-value")]
+pub struct TreasurySetEvent {
+    pub treasury: Address,
+}
+
+#[contractevent(topics = ["feeset"], data_format = "single-value")]
+pub struct FeeBpsSetEvent {
+    pub fee_bps: u32,
+}
+
+#[contractevent(topics = ["tokfeeset"], data_format = "single-value")]
+pub struct TokenFeeBpsSetEvent {
+    #[topic]
+    pub token: Address,
+    pub fee_bps: u32,
+}
+
+#[contractevent(topics = ["maxstrm"], data_format = "single-value")]
+pub struct MaxStreamsPerDonorSetEvent {
+    pub limit: u64,
+}
+
+#[contractevent(topics = ["rescue"], data_format = "single-value")]
+pub struct RescuedStreamEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub refund: i128,
 }
 
 mod math;
@@ -1147,7 +1176,7 @@ impl DonationVault {
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         extend_instance_ttl(&env);
 
-        env.events().publish((symbol_short!("treasset"),), treasury);
+        TreasurySetEvent { treasury }.publish(&env);
 
         Ok(())
     }
@@ -1241,7 +1270,7 @@ impl DonationVault {
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
         extend_instance_ttl(&env);
 
-        env.events().publish((symbol_short!("feeset"),), fee_bps);
+        FeeBpsSetEvent { fee_bps }.publish(&env);
 
         Ok(())
     }
@@ -1319,8 +1348,7 @@ impl DonationVault {
         );
         extend_instance_ttl(&env);
 
-        env.events()
-            .publish((symbol_short!("tokfeeset"), token), fee_bps);
+        TokenFeeBpsSetEvent { token, fee_bps }.publish(&env);
 
         Ok(())
     }
@@ -1454,7 +1482,7 @@ impl DonationVault {
             .instance()
             .set(&DataKey::MaxStreamsPerDonor, &limit);
         extend_instance_ttl(&env);
-        env.events().publish((symbol_short!("maxstrm"),), limit);
+        MaxStreamsPerDonorSetEvent { limit }.publish(&env);
         Ok(())
     }
 
@@ -1865,8 +1893,7 @@ impl DonationVault {
         // topics and data so the indexer needs no batch-specific handling.
         for (stream_id, accrued) in stream_ids.iter().zip(amounts.iter()) {
             if accrued > 0 {
-                env.events()
-                    .publish((symbol_short!("withdraw"), stream_id), accrued);
+                WithdrawnEvent { stream_id, accrued }.publish(&env);
             }
         }
 
@@ -1954,8 +1981,12 @@ impl DonationVault {
         // here would produce a duplicate that an indexer can't distinguish
         // from a real cancellation (see issue #91).
         if accrued > 0 || refund > 0 {
-            env.events()
-                .publish((symbol_short!("cancel"), stream_id), (accrued, refund));
+            CancelledStreamEvent {
+                stream_id,
+                accrued,
+                refund,
+            }
+            .publish(&env);
         }
 
         Ok(refund)
@@ -2050,8 +2081,7 @@ impl DonationVault {
             .unwrap_or(0);
         extend_cancelled_stream_ttl(&env, stream_id, grace_ledgers)?;
 
-        env.events()
-            .publish((symbol_short!("rescue"), stream_id), refund);
+        RescuedStreamEvent { stream_id, refund }.publish(&env);
 
         Ok(refund)
     }
@@ -2198,8 +2228,12 @@ impl DonationVault {
             pay_ngo(&env, &token_client, &stream.ngo, accrued);
         }
 
-        env.events()
-            .publish((symbol_short!("ratemod"), stream_id), (old_rate, new_rate));
+        RateModifiedEvent {
+            stream_id,
+            old_rate,
+            new_rate,
+        }
+        .publish(&env);
 
         Ok(())
     }

@@ -8,7 +8,7 @@ use soroban_sdk::testutils::{
 };
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal, ScVec};
-use soroban_sdk::{IntoVal, Symbol, TryFromVal, Val, Vec};
+use soroban_sdk::{symbol_short, IntoVal, Symbol, TryFromVal, Val, Vec};
 
 /// Asserts that the most recently published event has the given topics and
 /// data, regardless of which contract emitted it — vault entry points always
