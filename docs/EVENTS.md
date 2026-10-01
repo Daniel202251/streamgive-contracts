@@ -7,6 +7,17 @@ going to `streamgive-docs` first.
 Soroban events have two parts:
 
 - **Topics** — a tuple, always starting with a `Symbol` naming the event.
+The contracts define migrated event declarations with Soroban SDK's
+`#[contractevent]` macro. Explicit topic names and data formats keep the wire
+layout stable. Event type names include `RegisterEvent`, `RenamedEvent`,
+`ApprovedEvent`, `RevokedEvent`, `UnregisteredEvent`, `ProposedAdminEvent`,
+`AcceptedAdminEvent`, `CancelledAdminEvent`, `PausedEvent`, `UnpausedEvent`,
+`TreasurySetEvent`, `FeeBpsSetEvent`, `TokenFeeBpsSetEvent`,
+`MaxStreamsPerDonorSetEvent`, `CreatedEvent`, `WithdrawnEvent`,
+`CancelledStreamEvent`, `RescuedStreamEvent`, `ToppedUpEvent`, and
+`RateModifiedEvent`.
+
+- **Topics** â€” a tuple, always starting with a `Symbol` naming the event.
   Topics are indexed/filterable.
 - **Data** — the event payload. Shown below as the Rust type(s) passed to
   `env.events().publish((topics...), data)`. A single value publishes as
@@ -122,6 +133,20 @@ with `FeeTooHigh` and emit nothing. The event carries the full new value
 "Accepted" here means stored, not effective: the fee only affects payouts
 once a treasury is set, so pair this with `set_treasury`/`treasury()` when
 deriving an actual split.
+
+### `treasset`
+
+Emitted by `set_treasury` when an admin changes where protocol fees are paid.
+
+| | |
+|---|---|
+| Topics | `("treasset",)` |
+| Data | `treasury: Address` (the new treasury address) |
+
+The event carries the new treasury address so an off-chain indexer can track
+where protocol fees will flow without polling `treasury()`. Protocol fees only
+affect payouts once a treasury is configured, so pair this with `feeset`/`fee_bps()`
+when deriving an actual split.
 
 ### `created`
 
