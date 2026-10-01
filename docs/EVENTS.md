@@ -6,6 +6,16 @@ going to `streamgive-docs` first.
 
 Soroban events have two parts:
 
+The contracts define migrated event declarations with Soroban SDK's
+`#[contractevent]` macro. Explicit topic names and data formats keep the wire
+layout stable. Event type names include `RegisterEvent`, `RenamedEvent`,
+`ApprovedEvent`, `RevokedEvent`, `UnregisteredEvent`, `ProposedAdminEvent`,
+`AcceptedAdminEvent`, `CancelledAdminEvent`, `PausedEvent`, `UnpausedEvent`,
+`TreasurySetEvent`, `FeeBpsSetEvent`, `TokenFeeBpsSetEvent`,
+`MaxStreamsPerDonorSetEvent`, `CreatedEvent`, `WithdrawnEvent`,
+`CancelledStreamEvent`, `RescuedStreamEvent`, `ToppedUpEvent`, and
+`RateModifiedEvent`.
+
 - **Topics** â€” a tuple, always starting with a `Symbol` naming the event.
   Topics are indexed/filterable.
 - **Data** â€” the event payload. Shown below as the Rust type(s) passed to
