@@ -979,6 +979,9 @@ fn set_treasury_rejects_the_vault_own_address_when_none_is_set() {
     let result = s.client.try_set_treasury(&s.client.address);
     assert_eq!(result, Err(Ok(Error::InvalidTreasury)));
     assert_eq!(s.client.treasury(), None);
+}
+
+#[test]
 fn get_config_reflects_admin_settings() {
     let s = setup();
     let treasury = Address::generate(&s.env);
@@ -1594,7 +1597,10 @@ fn renounce_admin_disables_admin_gated_calls() {
     // Admin-gated entry points must now fail cleanly rather than succeed.
     assert!(s.client.try_pause().is_err());
     assert!(s.client.try_unpause().is_err());
-    assert!(s.client.try_set_treasury(&Address::generate(&s.env)).is_err());
+    assert!(s
+        .client
+        .try_set_treasury(&Address::generate(&s.env))
+        .is_err());
     assert!(s.client.try_clear_treasury().is_err());
     assert!(s.client.try_set_fee_bps(&100).is_err());
     assert!(s
