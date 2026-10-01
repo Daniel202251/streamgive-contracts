@@ -60,6 +60,10 @@ This project does not yet follow a formal versioning scheme — each contract's
   `wasm32v1-none` release build, and `cargo test --workspace`.
 - README FAQ covering the license, release overflow checks, `no_std`, storage
   TTLs, and cancelled-stream retention.
+- `docs/THREAT_MODEL.md`: assets, actors and trust boundaries, security
+  invariants, and per-contract threat tables (authorization and accounting,
+  availability and storage economics, registry identity, privilege/deployment
+  and off-chain), plus a residual-risk register of open items.
 
 ### Changed
 
