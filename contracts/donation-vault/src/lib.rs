@@ -1067,6 +1067,8 @@ impl DonationVault {
     }
 
     /// Sets where the protocol fee (if any) gets paid. Admin-gated.
+    /// Emits a `treasset` event carrying the new address so an off-chain
+    /// indexer can track treasury changes without polling `treasury`.
     ///
     /// # Examples
     ///
@@ -1087,6 +1089,9 @@ impl DonationVault {
         require_admin(&env)?;
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         extend_instance_ttl(&env);
+
+        env.events().publish((symbol_short!("treasset"),), treasury);
+
         Ok(())
     }
 

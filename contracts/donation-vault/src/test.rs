@@ -990,6 +990,13 @@ fn withdraw_splits_protocol_fee_to_treasury() {
 
     let treasury = Address::generate(&s.env);
     s.client.set_treasury(&treasury);
+    assert_eq!(
+        last_event(&s.env),
+        (
+            (symbol_short!("treasset"),).into_val(&s.env),
+            treasury.clone().into_val(&s.env),
+        )
+    );
     s.client.set_fee_bps(&500); // 5%
     assert_last_event(&s.env, (symbol_short!("feeset"),), 500u32);
 
@@ -1189,6 +1196,22 @@ fn set_fee_bps_boundary_exact_max_succeeds() {
     // can't hide behind a different error path.
     let result = s.client.try_set_fee_bps(&1_001);
     assert_eq!(result, Err(Ok(Error::FeeTooHigh)));
+}
+
+#[test]
+fn set_treasury_emits_treasset_event() {
+    let s = setup();
+
+    let first = Address::generate(&s.env);
+    s.client.set_treasury(&first);
+    assert_last_event(&s.env, (symbol_short!("treasset"),), first.clone());
+    assert_eq!(s.client.treasury(), Some(first));
+
+    // Re-pointing the treasury publishes the replacement address.
+    let second = Address::generate(&s.env);
+    s.client.set_treasury(&second);
+    assert_last_event(&s.env, (symbol_short!("treasset"),), second.clone());
+    assert_eq!(s.client.treasury(), Some(second));
 }
 
 #[test]
