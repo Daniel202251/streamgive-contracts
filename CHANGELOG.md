@@ -23,14 +23,8 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `donation-vault`: admin-configurable `cancel_grace_ledgers` retention for
   cancelled streams, with TTL coverage for indexing after cancellation.
 - `donation-vault`: read-only `pending_accrual` view.
-- `donation-vault`: read-only `streams_by_donor` view, backed by a
-  per-donor `Vec<u64>` of stream ids appended to by `create_stream`, so a
-  pure-RPC client can list a donor's streams without a backend index.
 - `donation-vault`: regression coverage for one-stroop-per-second streams and
   their zero-rounded protocol fee.
-- `donation-vault`: regression coverage for `modify_rate` called in the same
-  ledger as `create_stream` (zero elapsed time settles nothing, but the new
-  rate still takes effect).
 - `DataKey` enums now derive `Debug` in both contracts for clearer storage-key
   diagnostics.
 - `donation-vault`: read-only `allowed_tokens` getter for frontend token pickers.
@@ -44,8 +38,6 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `ngo-registry`: owner-gated `update_name` for fixing an application's
   name before approval; rejected with `Error::AlreadyVerified` after.
 - `ngo-registry`: read-only `ngo_count` getter for total registered NGOs.
-- `ngo-registry`: two-step admin transfer via `propose_admin` / `accept_admin`
-  / `cancel_admin_proposal`, matching `donation-vault`'s pattern.
 - Contract events for registry and vault state changes (see
   [`docs/EVENTS.md`](docs/EVENTS.md)).
 - Document storage TTL policy, inactivity expiry risks, and keep-alive entry
@@ -78,5 +70,11 @@ This project does not yet follow a formal versioning scheme — each contract's
   positional payload formats are declared in code and documented in
   `docs/EVENTS.md`; consumers should update to the generated event types
   before the next contract release.
+
+### Fixed
+
+- `donation-vault`: `set_treasury` rejects the vault's own address with
+  `Error::InvalidTreasury`, so protocol fees can't be locked in the
+  contract.
 
 [Unreleased]: https://github.com/StreamGive/streamgive-contracts/compare/main...HEAD
