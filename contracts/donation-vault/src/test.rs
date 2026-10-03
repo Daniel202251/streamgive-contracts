@@ -2419,6 +2419,121 @@ fn status_is_queryable_after_cancel_then_further_operations_fail() {
     assert_eq!(result, Err(Ok(Error::NothingToWithdraw)));
     // top_up on a cancelled stream is rejected (cancelled sets rate = 0).
     s.env.ledger().with_mut(|l| l.timestamp += 10);
-    let result = s.client.try_withdraw(&stream_id);
+let result = s.client.try_withdraw(&stream_id);
     assert!(result.is_err()); // nothing left to withdraw
+}
+
+// =============================================================================
+// transfer_stream (reassign a stream to a new NGO)
+// =============================================================================
+
+#[test]
+fn transfer_stream_settles_accrual_to_old_ngo_and_points_at_new_ngo() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let new_ngo = Address::generate(&s.env);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // 50 seconds pass -> 500 accrues to the old NGO.
+    s.env.ledger().with_mut(|l| l.timestamp += 50);
+
+    s.client.transfer_stream(&stream_id, &new_ngo);
+
+    // The accrued 500 settled to the old NGO, and the new NGO got nothing
+    // yet — only future accrual goes to it.
+    assert_eq!(s.token.balance(&s.ngo), 500);
+    assert_eq!(s.token.balance(&new_ngo), 0);
+
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.ngo, new_ngo);
+    assert_eq!(stream.balance, 500);
+    assert_eq!(stream.withdrawn, 500);
+    assert_eq!(stream.rate, 10);
+    assert!(!stream.cancelled);
+
+    // Further accrual now flows to the new NGO.
+    s.env.ledger().with_mut(|l| l.timestamp += 20);
+    assert_eq!(s.client.withdraw(&stream_id), 200);
+    assert_eq!(s.token.balance(&new_ngo), 200);
+    assert_eq!(s.token.balance(&s.ngo), 500);
+}
+
+#[test]
+fn transfer_stream_emits_event_with_old_and_new_ngo() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let new_ngo = Address::generate(&s.env);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    s.client.transfer_stream(&stream_id, &new_ngo);
+    let transferred = last_event(&s.env);
+
+    assert_eq!(
+        transferred,
+        (
+            (symbol_short!("transfer"), stream_id).into_val(&s.env),
+            (s.ngo.clone(), new_ngo.clone()).into_val(&s.env),
+        )
+    );
+}
+
+#[test]
+fn transfer_stream_requires_donor_auth() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let new_ngo = Address::generate(&s.env);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    s.client.transfer_stream(&stream_id, &new_ngo);
+
+    assert_auth_required_from(&s, &s.donor, "transfer_stream");
+}
+
+#[test]
+fn transfer_stream_on_cancelled_stream_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let new_ngo = Address::generate(&s.env);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.client.cancel_stream(&stream_id);
+
+    let result = s.client.try_transfer_stream(&stream_id, &new_ngo);
+    assert_eq!(result, Err(Ok(Error::StreamCancelled)));
+
+    // The rejected call leaves the cancelled stream pointing at the old NGO.
+    assert_eq!(s.client.get_stream(&stream_id).ngo, s.ngo);
+}
+
+#[test]
+fn transfer_stream_on_unknown_stream_fails() {
+    let s = setup();
+    let new_ngo = Address::generate(&s.env);
+
+    let result = s.client.try_transfer_stream(&999, &new_ngo);
+    assert_eq!(result, Err(Ok(Error::StreamNotFound)));
+}
+
+#[test]
+fn transfer_stream_bumps_instance_and_stream_ttl() {
+    let s = setup();
+    let stream_id = create_ttl_test_stream(&s);
+    let new_ngo = Address::generate(&s.env);
+    age_past_thresholds(&s, Some(stream_id));
+
+    s.client.transfer_stream(&stream_id, &new_ngo);
+
+    assert_eq!(instance_ttl(&s), INSTANCE_BUMP_AMOUNT);
+    assert_eq!(stream_ttl(&s, stream_id), STREAM_BUMP_AMOUNT);
 }
