@@ -3,15 +3,15 @@
 
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
-use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Ledger, MockAuth, MockAuthInvoke};
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, Events as _, Ledger, MockAuth, MockAuthInvoke,
 };
+use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Ledger, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::xdr::{ContractEventBody, ScVal, ScVec};
-use soroban_sdk::{IntoVal, Symbol, TryFromVal, Val, Vec};
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal, ScVec};
+use soroban_sdk::xdr::{ContractEventBody, ScVal, ScVec};
 use soroban_sdk::{symbol_short, IntoVal, Symbol, TryFromVal, Val, Vec};
+use soroban_sdk::{IntoVal, Symbol, TryFromVal, Val, Vec};
 
 /// Asserts that the most recently published event has the given topics and
 /// data, regardless of which contract emitted it — vault entry points always
@@ -144,7 +144,6 @@ fn full_lifecycle_create_accrue_withdraw_cancel() {
             )
                 .into_val(&s.env),
         )
-        ),
     );
     assert_eq!(s.token.balance(&s.donor), 0);
     assert_eq!(s.token.balance(&s.client.address), 1_000);
@@ -1059,7 +1058,6 @@ fn set_fee_bps_boundary_exact_max_succeeds() {
 }
 
 #[test]
-fn pending_payout_with_no_treasury_returns_full_gross_and_zero_fee() {
 fn set_treasury_emits_treasset_event() {
     let s = setup();
 
@@ -2439,7 +2437,7 @@ fn status_is_queryable_after_cancel_then_further_operations_fail() {
     assert_eq!(result, Err(Ok(Error::NothingToWithdraw)));
     // top_up on a cancelled stream is rejected (cancelled sets rate = 0).
     s.env.ledger().with_mut(|l| l.timestamp += 10);
-let result = s.client.try_withdraw(&stream_id);
+    let result = s.client.try_withdraw(&stream_id);
     assert!(result.is_err()); // nothing left to withdraw
 }
 
@@ -2573,6 +2571,7 @@ fn double_init_fails_and_preserves_original_admin() {
 
 #[test]
 fn total_donated_counts_create_and_top_up() {
+fn pause_blocks_top_up_without_mutating_stream_or_balances() {
     let s = setup();
     s.token_admin.mint(&s.donor, &2_000);
 

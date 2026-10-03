@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String,
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
-    String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address,
+    Bytes, BytesN, Env, String, Vec,
 };
 
 #[contractevent(topics = ["register"], data_format = "single-value")]
@@ -95,6 +94,8 @@ pub enum Error {
     /// The proposed administrator is not a valid replacement.
     InvalidAdmin = 9,
     ArithmeticOverflow = 10,
+    /// The supplied name is empty or contains only ASCII whitespace.
+    InvalidName = 11,
 }
 
 /// Upper bound on `Ngo.name`, in bytes. Persistent storage cost scales with
@@ -126,6 +127,14 @@ fn extend_ngo_ttl(env: &Env, owner: &Address) {
         NGO_LIFETIME_THRESHOLD,
         NGO_BUMP_AMOUNT,
     );
+}
+
+fn is_whitespace_only(name: &String) -> bool {
+    let bytes: Bytes = name.into();
+    bytes.is_empty()
+        || bytes
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c'))
 }
 
 /// Reads the configured admin and requires their auth, failing with
@@ -349,7 +358,8 @@ impl NgoRegistry {
     }
 
     /// Submits an NGO application. Callable by the NGO's own address.
-    /// The entry starts unverified until an admin approves it.
+    /// The entry starts unverified until an admin approves it. Names that
+    /// are empty or contain only ASCII whitespace return `Error::InvalidName`.
     ///
     /// # Examples
     ///
@@ -373,6 +383,9 @@ impl NgoRegistry {
     pub fn register(env: Env, owner: Address, name: String) -> Result<(), Error> {
         owner.require_auth();
 
+        if is_whitespace_only(&name) {
+            return Err(Error::InvalidName);
+        }
         if name.len() > MAX_NGO_NAME_LEN {
             return Err(Error::NameTooLong);
         }
