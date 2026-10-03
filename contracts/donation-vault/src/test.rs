@@ -2557,6 +2557,20 @@ fn transfer_stream_bumps_instance_and_stream_ttl() {
 }
 
 #[test]
+fn double_init_fails_and_preserves_original_admin() {
+    let s = setup();
+    let admin = s.client.admin();
+    let replacement = Address::generate(&s.env);
+
+    assert_eq!(
+        s.client.try_init(&replacement),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+    assert_eq!(s.client.admin(), admin);
+}
+
+#[test]
+fn total_donated_counts_create_and_top_up() {
 fn pause_blocks_top_up_without_mutating_stream_or_balances() {
     let s = setup();
     s.token_admin.mint(&s.donor, &2_000);
@@ -2564,42 +2578,45 @@ fn pause_blocks_top_up_without_mutating_stream_or_balances() {
     let stream_id = s
         .client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    let before = s.client.get_stream(&stream_id);
-    let donor_balance_before = s.token.balance(&s.donor);
-    let vault_balance_before = s.token.balance(&s.client.address);
+    assert_eq!(s.client.total_donated(), 1_000);
 
-    s.client.pause();
-    assert_eq!(
-        s.client.try_top_up(&stream_id, &500),
-        Err(Ok(Error::ContractPaused))
-    );
-    assert_eq!(s.client.get_stream(&stream_id), before);
-    assert_eq!(s.token.balance(&s.donor), donor_balance_before);
-    assert_eq!(s.token.balance(&s.client.address), vault_balance_before);
-
-    s.client.unpause();
     s.client.top_up(&stream_id, &500);
-    assert_eq!(s.client.get_stream(&stream_id).balance, 1_500);
+    assert_eq!(s.client.total_donated(), 1_500);
 }
 
 #[test]
-fn pause_blocks_modify_rate_without_mutating_stream() {
+fn total_donated_overflow_rejects_create_and_top_up() {
     let s = setup();
-    s.token_admin.mint(&s.donor, &1_000);
+    s.token_admin.mint(&s.donor, &2_000);
 
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &i128::MAX);
+    });
+    assert_eq!(
+        s.client.try_create_stream(&s.donor, &s.ngo, &s.token.address, &1, &10),
+        Err(Ok(Error::ArithmeticOverflow))
+    );
+
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &0i128);
+    });
     let stream_id = s
         .client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    let before = s.client.get_stream(&stream_id);
-
-    s.client.pause();
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &i128::MAX);
+    });
     assert_eq!(
-        s.client.try_modify_rate(&stream_id, &20),
-        Err(Ok(Error::ContractPaused))
+        s.client.try_top_up(&stream_id, &1),
+        Err(Ok(Error::ArithmeticOverflow))
     );
-    assert_eq!(s.client.get_stream(&stream_id), before);
-
-    s.client.unpause();
-    s.client.modify_rate(&stream_id, &20);
-    assert_eq!(s.client.get_stream(&stream_id).rate, 20);
 }

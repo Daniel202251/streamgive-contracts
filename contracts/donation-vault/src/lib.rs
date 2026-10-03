@@ -193,6 +193,8 @@ pub enum DataKey {
     Paused,
     Treasury,
     FeeBps,
+    /// Lifetime sum of successful stream deposits and top-ups.
+    TotalDonated,
     /// The token allowlist surfaced to frontend token pickers. See
     /// [`allowed_tokens`](DonationVault::allowed_tokens); empty until an
     /// operator configures one.
@@ -492,6 +494,7 @@ impl DonationVault {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
         env.storage().instance().set(&DataKey::MinDeposit, &0i128);
+        env.storage().instance().set(&DataKey::TotalDonated, &0i128);
         env.storage()
             .instance()
             .set(&DataKey::CancelGraceLedgers, &0u32);
@@ -535,6 +538,12 @@ impl DonationVault {
         env.events().publish((symbol_short!("renounce"),), ());
 
         Ok(())
+    }
+
+    /// Returns the cumulative amount deposited into all streams, including top-ups.
+    /// Withdrawals and cancellations do not reduce this lifetime total.
+    pub fn total_donated(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey::TotalDonated).unwrap_or(0)
     }
 
     /// Reads back the vault admin set by `init`.
@@ -1515,8 +1524,18 @@ impl DonationVault {
             return Err(Error::InvalidAmount);
         }
 
+        let total_donated: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalDonated)
+            .unwrap_or(0);
+        let next_total = total_donated
+            .checked_add(deposit)
+            .ok_or(Error::ArithmeticOverflow)?;
+
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&donor, env.current_contract_address(), &deposit);
+        env.storage().instance().set(&DataKey::TotalDonated, &next_total);
 
         let stream_id: u64 = env
             .storage()
@@ -1999,7 +2018,16 @@ impl DonationVault {
             .balance
             .checked_add(amount)
             .ok_or(Error::ArithmeticOverflow)?;
+        let total_donated: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalDonated)
+            .unwrap_or(0);
+        let next_total = total_donated
+            .checked_add(amount)
+            .ok_or(Error::ArithmeticOverflow)?;
 
+        env.storage().instance().set(&DataKey::TotalDonated, &next_total);
         env.storage().persistent().set(&key, &stream);
         extend_instance_ttl(&env);
         extend_stream_ttl(&env, stream_id);
