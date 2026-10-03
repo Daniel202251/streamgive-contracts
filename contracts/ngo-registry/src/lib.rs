@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String,
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, BytesN, Env,
-    String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address,
+    Bytes, BytesN, Env, String, Vec,
 };
 
 #[contractevent(topics = ["register"], data_format = "single-value")]
@@ -69,7 +68,11 @@ pub struct Ngo {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
+    /// The address authorized to initialize and administer the registry.
     Admin,
+    /// Running total of registered NGOs (a `u32`, seeded from `NgoCount`).
+    TotalNgos,
+    /// The registry record keyed by an NGO owner's address.
     Ngo(Address),
     NgoCount,
 }
