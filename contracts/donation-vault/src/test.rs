@@ -2557,3 +2557,67 @@ fn transfer_stream_bumps_instance_and_stream_ttl() {
     assert_eq!(instance_ttl(&s), INSTANCE_BUMP_AMOUNT);
     assert_eq!(stream_ttl(&s, stream_id), STREAM_BUMP_AMOUNT);
 }
+
+#[test]
+fn double_init_fails_and_preserves_original_admin() {
+    let s = setup();
+    let admin = s.client.admin();
+    let replacement = Address::generate(&s.env);
+
+    assert_eq!(
+        s.client.try_init(&replacement),
+        Err(Ok(Error::AlreadyInitialized))
+    );
+    assert_eq!(s.client.admin(), admin);
+}
+
+#[test]
+fn total_donated_counts_create_and_top_up() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    assert_eq!(s.client.total_donated(), 1_000);
+
+    s.client.top_up(&stream_id, &500);
+    assert_eq!(s.client.total_donated(), 1_500);
+}
+
+#[test]
+fn total_donated_overflow_rejects_create_and_top_up() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &i128::MAX);
+    });
+    assert_eq!(
+        s.client.try_create_stream(&s.donor, &s.ngo, &s.token.address, &1, &10),
+        Err(Ok(Error::ArithmeticOverflow))
+    );
+
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &0i128);
+    });
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDonated, &i128::MAX);
+    });
+    assert_eq!(
+        s.client.try_top_up(&stream_id, &1),
+        Err(Ok(Error::ArithmeticOverflow))
+    );
+}
