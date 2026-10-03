@@ -2557,3 +2557,51 @@ fn transfer_stream_bumps_instance_and_stream_ttl() {
     assert_eq!(instance_ttl(&s), INSTANCE_BUMP_AMOUNT);
     assert_eq!(stream_ttl(&s, stream_id), STREAM_BUMP_AMOUNT);
 }
+
+#[test]
+fn pause_blocks_top_up_without_mutating_stream_or_balances() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let before = s.client.get_stream(&stream_id);
+    let donor_balance_before = s.token.balance(&s.donor);
+    let vault_balance_before = s.token.balance(&s.client.address);
+
+    s.client.pause();
+    assert_eq!(
+        s.client.try_top_up(&stream_id, &500),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+    assert_eq!(s.token.balance(&s.donor), donor_balance_before);
+    assert_eq!(s.token.balance(&s.client.address), vault_balance_before);
+
+    s.client.unpause();
+    s.client.top_up(&stream_id, &500);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_500);
+}
+
+#[test]
+fn pause_blocks_modify_rate_without_mutating_stream() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let before = s.client.get_stream(&stream_id);
+
+    s.client.pause();
+    assert_eq!(
+        s.client.try_modify_rate(&stream_id, &20),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+
+    s.client.unpause();
+    s.client.modify_rate(&stream_id, &20);
+    assert_eq!(s.client.get_stream(&stream_id).rate, 20);
+}
