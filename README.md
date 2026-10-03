@@ -3,6 +3,12 @@
 Soroban smart contracts powering StreamGive, a recurring/streaming donation
 platform for verified NGOs on Stellar.
 
+For how these contracts fit with the backend and frontend — and how a
+donation flows end to end — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For who these contracts defend against, what the admin can and cannot do, and
+which risks are knowingly accepted, see
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
 ## Contracts
 
 - `ngo-registry` — on-chain NGO application, verification, and registry
@@ -39,8 +45,13 @@ the instance storage: no funds are moved, so every balance stays exactly
 where it was and there is nothing to unwind when the pause is lifted.
 
 While the vault is paused, every entry point that moves tokens or changes
-a stream rejects the call with `Error::ContractPaused` (code 6) before
 touching storage or requiring any auth:
+Note that pausing does **not** stop time-based accrual. A stream's
+`pending_accrual` keeps growing while the vault is paused, so a stream
+paused for a week still owes a week of accrual once the pause is lifted.
+That accrual is claimable via `withdraw` as soon as the vault is
+unpaused.
+
 
 | Entry point     | While paused                                    |
 | --------------- | ----------------------------------------------- |
@@ -49,6 +60,7 @@ touching storage or requiring any auth:
 | `top_up`        | Rejected                                        |
 | `modify_rate`   | Rejected                                        |
 | `cancel_stream` | Still works — settles and refunds as usual      |
+
 
 `withdraw` being on that list is the point of the brake: it is the only
 path that pays tokens straight out of the vault, so a pause triggered by a
@@ -61,6 +73,43 @@ donor's unspent deposit. The read-only views (`admin`, `pending_admin`,
 `get_stream`, `stream_count`, `pending_accrual`, `paused`, `treasury`,
 `fee_bps`) and `extend_stream` also keep working, since none of them can
 move funds, and `unpause` is of course still reachable.
+
+## Storage TTL and keeping entries alive
+
+Soroban contracts use bounded Time-To-Live (TTL) for on-chain state retention:
+
+- **Instance storage** (contract admins, configuration, pause flags) is bumped
+  to 30 days (`518,400` ledgers) on every state-changing call.
+- **Persistent storage** (each individual `Stream` record in `donation-vault` and
+  each `Ngo` record in `ngo-registry`) has an independent 90-day TTL (`1,555,200`
+  ledgers) that must be maintained per entry.
+
+### Expiry risk for idle entries
+
+If a stream has no activity (withdrawals, top-ups, rate modifications) or an NGO
+entry receives no updates for 90 consecutive days, its TTL expires and the network
+**archives** the entry.
+
+Archived entries cannot be read or modified by normal contract calls (`get_stream`,
+`withdraw`, verification lookups, etc. will fail) until a Soroban state restoration
+transaction is submitted and network restoration fees are paid. Long-running streams
+with low drip rates or infrequent withdrawals are especially at risk if left untouched.
+
+### Keep-alive entry points (`extend_stream` & `touch_ngo`)
+
+To protect idle entries from archival without moving funds, modifying balances, or
+requiring admin credentials, both contracts provide permissionless keep-alive entry
+points that anyone (donors, NGOs, keeper bots, or indexers) can invoke:
+
+- **`donation-vault::extend_stream(stream_id)`**: Extends the persistent storage
+  TTL of `DataKey::Stream(stream_id)` back to 90 days. Can be called at any time,
+  requires no authorization, and remains accessible even while the vault is paused.
+- **`ngo-registry::touch_ngo(owner)`**: Refreshes both the registry instance TTL
+  (to 30 days) and the NGO's persistent storage TTL (`DataKey::Ngo(owner)`) back
+  to 90 days without altering registration status. Requires no authorization.
+
+For full key specifications, bump thresholds, and archival lifecycle details, see
+[docs/STORAGE.md](docs/STORAGE.md).
 
 ## Related repositories
 
@@ -157,8 +206,17 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 6    | `ContractPaused`      | The admin has paused the vault; see [Pausing](#pausing) for what still works. |
 | 7    | `FeeTooHigh`          | `set_fee_bps` was called with a value above the 10% (1,000 bps) cap.     |
 | 8    | `NoPendingAdmin`      | `accept_admin` was called without a prior (or already-completed) `propose_admin`. |
+| 9    | `ArithmeticOverflow`  | A stream's `balance`/`withdrawn` or the stream-id counter would overflow. |
+| 10   | `InvalidTreasury`     | `set_treasury` was called with the vault's own address.                  |
 | 10   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`, which would stream the donor's own deposit back to them. |
 | 11   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 9    | `ArithmeticOverflow`  | A stream balance, withdrawn total, or stream ID would exceed its integer range. |
+| 10   | `DepositTooLow`       | `create_stream` was called with a deposit below the admin-configured minimum. |
+| 11   | `AlreadyPaused`       | `pause` was called when the vault was already paused. |
+| 12   | `AlreadyUnpaused`     | `unpause` was called when the vault was already active. |
+| 13   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`. |
+| 14   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 15   | `InvalidAdmin`        | `propose_admin` was called with the current admin instead of a different address. |
 
 ### `ngo-registry`
 
