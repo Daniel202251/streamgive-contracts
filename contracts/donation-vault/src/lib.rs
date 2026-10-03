@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, symbol_short,
-    token, Address, BytesN, Env, Map, String, Vec,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    symbol_short, token, Address, BytesN, Env, Map, String, Vec,
 };
 
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
@@ -341,12 +341,6 @@ fn admin_renounced(env: &Env) -> bool {
 }
 
 fn require_admin(env: &Env) -> Result<Address, Error> {
-    if env
-        .storage()
-        .instance()
-        .get(&DataKey::AdminRenounced)
-        .unwrap_or(false)
-    {
     if admin_renounced(env) {
         return Err(Error::AdminRenounced);
     }

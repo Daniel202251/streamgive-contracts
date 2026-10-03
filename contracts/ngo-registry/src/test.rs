@@ -4,12 +4,12 @@
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{Address as _, AuthorizedFunction, Events as _, Ledger};
-use soroban_sdk::{vec, IntoVal, Symbol};
-use soroban_sdk::{vec, IntoVal, Symbol, Val, Vec};
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, Events as _, Ledger, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::{symbol_short, vec, xdr, IntoVal, Symbol, TryFromVal, Val, Vec};
+use soroban_sdk::{vec, IntoVal, Symbol};
+use soroban_sdk::{vec, IntoVal, Symbol, Val, Vec};
 
 fn setup() -> (Env, NgoRegistryClient<'static>, Address) {
     let env = Env::default();
