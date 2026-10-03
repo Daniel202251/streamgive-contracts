@@ -241,10 +241,10 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 2    | `NotInitialized`      | `init` has not been called yet, so there is no admin to act as.  |
 | 3    | `AlreadyRegistered`   | `register` was called for an address that already has an entry. |
 | 4    | `NotRegistered`       | No registry entry exists for the given owner address.            |
-| 5    | `AlreadyVerified`     | `update_name` was called on an NGO that an admin has already approved and its name is locked, or `approve_ngo` was called on an NGO that's already verified. |
+| 5    | `AlreadyVerified`     | An approved NGO cannot change its name.                         |
 | 6    | `NameTooLong`         | `register` was called with a name longer than 200 bytes.         |
 | 7    | `NotVerified`         | `revoke_ngo` was called on an NGO that isn't currently verified.  |
-| 8    | `InvalidName`         | `register` received an empty or whitespace-only NGO name.       |
+| 8    | `NoPendingAdmin`      | `accept_admin` was called without a pending admin proposal.     |
 
 ## Status
 
