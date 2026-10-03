@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![no_std]
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    Address, BytesN, Env, String, Vec,
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, token,
-    Address, BytesN, Env, Map, String, Vec,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    symbol_short, token, Address, BytesN, Env, Map, String, Vec,
 };
 
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
@@ -247,13 +245,6 @@ pub enum Error {
     /// its rate would quietly revive a stream the backend already treats
     /// as terminal.
     StreamCancelled = 15,
-    DepositTooLow = 10,
-    /// `pause` was called while the vault was already paused.
-    AlreadyPaused = 11,
-    /// `unpause` was called while the vault was not paused.
-    AlreadyUnpaused = 12,
-    SelfStream = 13,
-    StreamCancelled = 14,
     /// The proposed administrator is not a valid replacement.
     InvalidAdmin = 16,
     /// The donor already has `max_streams_per_donor` streams. Raised by
@@ -272,22 +263,18 @@ pub enum Error {
     /// The admin has renounced control, so admin-gated calls are permanently
     /// disabled.
     AdminRenounced = 20,
-    StreamCounterMissing = 18,
     /// `set_fee_bps` was called with a non-zero fee while no treasury is
     /// configured. Without this, the fee would be silently dropped by
     /// `compute_fee` (which returns 0 whenever no treasury is set,
     /// regardless of `fee_bps`) - the admin would believe revenue is
     /// accruing when it isn't, with no error or event to say otherwise.
-    FeeRequiresTreasury = 19,
+    FeeRequiresTreasury = 21,
     /// `rescue_stream` was called while the vault is not paused. It only
     /// exists for incident response, not as an ordinary way to close a
     /// stream out.
-    NotPaused = 20,
+    NotPaused = 22,
     /// Every stream in a batch withdrawal must target the same NGO.
-    MixedNgo = 21,
-    /// The admin has renounced control, so admin-gated calls are permanently
-    /// disabled.
-    AdminRenounced = 22,
+    MixedNgo = 23,
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -354,12 +341,6 @@ fn admin_renounced(env: &Env) -> bool {
 }
 
 fn require_admin(env: &Env) -> Result<Address, Error> {
-    if env
-        .storage()
-        .instance()
-        .get(&DataKey::AdminRenounced)
-        .unwrap_or(false)
-    {
     if admin_renounced(env) {
         return Err(Error::AdminRenounced);
     }
@@ -401,17 +382,6 @@ fn record_payout(stream: &mut Stream, amount: i128) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the protocol fee that would be taken on `amount`, using the same
-/// logic as `pay_ngo`. Zero when no treasury is configured, regardless of
-/// `fee_bps` — there's nowhere to send a fee without a destination address.
-/// Rounds toward zero (the NGO never loses a unit to rounding).
-fn compute_fee(env: &Env, amount: i128) -> i128 {
-    let treasury: Option<Address> = env.storage().instance().get(&DataKey::Treasury);
-    match treasury {
-        Some(_) => {
-            let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-            (amount.saturating_mul(fee_bps as i128) / 10_000).min(amount)
-///
 /// Computes `amount * fee_bps / 10_000` without an intermediate overflow.
 /// `amount * fee_bps` can exceed `i128::MAX` for a large `amount` even
 /// though `fee_bps` is capped at `MAX_FEE_BPS` (1_000) — a naive
@@ -435,6 +405,15 @@ fn compute_fee(env: &Env, token: &Address, amount: i128) -> i128 {
     }
 }
 
+/// Returns a token-specific fee override, or the global fee when no override
+/// has been configured for `token`.
+fn effective_fee_bps(env: &Env, token: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TokenFeeBps(token.clone()))
+        .unwrap_or_else(|| env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0))
+}
+
 /// Pays `amount` out to the NGO, skimming a protocol fee to the treasury
 /// first if one is configured. With no treasury set, the full amount goes
 /// to the NGO regardless of `fee_bps` — there's nowhere to send a fee.
@@ -448,7 +427,6 @@ fn pay_ngo(env: &Env, token_client: &token::Client, ngo: &Address, amount: i128)
         return 0;
     }
 
-    let fee = compute_fee(env, amount);
     let treasury: Option<Address> = env.storage().instance().get(&DataKey::Treasury);
     let fee = compute_fee(env, &token_client.address, amount);
     let net = amount - fee;
@@ -918,7 +896,7 @@ impl DonationVault {
         let now = env.ledger().timestamp();
         let elapsed = now.saturating_sub(stream.last_update);
         let gross = math::accrued(stream.rate, elapsed, stream.balance);
-        let fee = compute_fee(&env, gross);
+        let fee = compute_fee(&env, &stream.token, gross);
         Ok((gross - fee, fee))
     }
 
@@ -1339,9 +1317,9 @@ impl DonationVault {
             .unwrap_or(0)
     }
 
-    /// Sets the number of additional ledgers that a cancelled stream remains
-    /// available for indexing after the normal stream TTL bump. Admin-gated.
-    /// A value of zero preserves the default stream retention period.
+    /// Sets the extra retention window applied to cancelled stream records
+    /// so indexers can observe their final state before the entry expires.
+    /// The value is measured in ledgers and defaults to zero.
     pub fn set_cancel_grace_ledgers(env: Env, grace_ledgers: u32) -> Result<(), Error> {
         require_admin(&env)?;
         STREAM_BUMP_AMOUNT
@@ -1354,8 +1332,7 @@ impl DonationVault {
         Ok(())
     }
 
-    /// Reads the additional cancelled-stream retention period, in ledgers.
-    /// Returns the configured cancelled-stream indexing grace period.
+    /// Returns the configured cancelled-stream retention window in ledgers.
     pub fn cancel_grace_ledgers(env: Env) -> u32 {
         env.storage()
             .instance()

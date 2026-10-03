@@ -227,8 +227,9 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 3    | `AlreadyRegistered`   | `register` was called for an address that already has an entry. |
 | 4    | `NotRegistered`       | No registry entry exists for the given owner address.            |
 | 5    | `AlreadyVerified`     | `update_name` was called on an NGO that an admin has already approved and its name is locked, or `approve_ngo` was called on an NGO that's already verified. |
-| 6    | `InvalidName`         | `register` was called with a zero-length name.                   |
+| 6    | `NameTooLong`         | `register` was called with a name longer than 200 bytes.         |
 | 7    | `NotVerified`         | `revoke_ngo` was called on an NGO that isn't currently verified.  |
+| 8    | `InvalidName`         | `register` received an empty or whitespace-only NGO name.       |
 
 ## Status
 
