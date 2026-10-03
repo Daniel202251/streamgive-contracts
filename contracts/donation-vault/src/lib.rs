@@ -388,17 +388,6 @@ fn record_payout(stream: &mut Stream, amount: i128) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the protocol fee that would be taken on `amount`, using the same
-/// logic as `pay_ngo`. Zero when no treasury is configured, regardless of
-/// `fee_bps` — there's nowhere to send a fee without a destination address.
-/// Rounds toward zero (the NGO never loses a unit to rounding).
-fn compute_fee(env: &Env, amount: i128) -> i128 {
-    let treasury: Option<Address> = env.storage().instance().get(&DataKey::Treasury);
-    match treasury {
-        Some(_) => {
-            let fee_bps: u32 = env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0);
-            (amount.saturating_mul(fee_bps as i128) / 10_000).min(amount)
-///
 /// Computes `amount * fee_bps / 10_000` without an intermediate overflow.
 /// `amount * fee_bps` can exceed `i128::MAX` for a large `amount` even
 /// though `fee_bps` is capped at `MAX_FEE_BPS` (1_000) — a naive
@@ -422,6 +411,15 @@ fn compute_fee(env: &Env, token: &Address, amount: i128) -> i128 {
     }
 }
 
+/// Returns a token-specific fee override, or the global fee when no override
+/// has been configured for `token`.
+fn effective_fee_bps(env: &Env, token: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::TokenFeeBps(token.clone()))
+        .unwrap_or_else(|| env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0))
+}
+
 /// Pays `amount` out to the NGO, skimming a protocol fee to the treasury
 /// first if one is configured. With no treasury set, the full amount goes
 /// to the NGO regardless of `fee_bps` — there's nowhere to send a fee.
@@ -435,7 +433,6 @@ fn pay_ngo(env: &Env, token_client: &token::Client, ngo: &Address, amount: i128)
         return 0;
     }
 
-    let fee = compute_fee(env, amount);
     let treasury: Option<Address> = env.storage().instance().get(&DataKey::Treasury);
     let fee = compute_fee(env, &token_client.address, amount);
     let net = amount - fee;
@@ -905,7 +902,7 @@ impl DonationVault {
         let now = env.ledger().timestamp();
         let elapsed = now.saturating_sub(stream.last_update);
         let gross = math::accrued(stream.rate, elapsed, stream.balance);
-        let fee = compute_fee(&env, gross);
+        let fee = compute_fee(&env, &stream.token, gross);
         Ok((gross - fee, fee))
     }
 
