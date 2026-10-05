@@ -14,6 +14,21 @@ which risks are knowingly accepted, see
 - `ngo-registry` — on-chain NGO application, verification, and registry
 - `donation-vault` — streaming donation vault (create / withdraw / cancel / modify streams)
 
+### Donation-vault admin transfer
+
+Admin changes use a two-step handshake:
+
+1. The current admin calls `propose_admin(new_admin)`, which records the
+   pending administrator without changing the active admin.
+2. The proposed address calls `accept_admin()` to complete the transfer.
+3. Either side can abort the pending transfer by calling
+   `cancel_admin_proposal()` before acceptance; the active admin remains
+   unchanged.
+
+Only the current admin can propose or cancel a transfer, and only the pending
+administrator can accept it. The current admin continues to control
+admin-gated operations until acceptance succeeds.
+
 ## Release profile
 
 The workspace `Cargo.toml`'s `[profile.release]` sets several non-default
@@ -226,9 +241,10 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 2    | `NotInitialized`      | `init` has not been called yet, so there is no admin to act as.  |
 | 3    | `AlreadyRegistered`   | `register` was called for an address that already has an entry. |
 | 4    | `NotRegistered`       | No registry entry exists for the given owner address.            |
-| 5    | `AlreadyVerified`     | `update_name` was called on an NGO that an admin has already approved and its name is locked, or `approve_ngo` was called on an NGO that's already verified. |
-| 6    | `InvalidName`         | `register` was called with a zero-length name.                   |
+| 5    | `AlreadyVerified`     | An approved NGO cannot change its name.                         |
+| 6    | `NameTooLong`         | `register` was called with a name longer than 200 bytes.         |
 | 7    | `NotVerified`         | `revoke_ngo` was called on an NGO that isn't currently verified.  |
+| 8    | `NoPendingAdmin`      | `accept_admin` was called without a pending admin proposal.     |
 
 ## Status
 
