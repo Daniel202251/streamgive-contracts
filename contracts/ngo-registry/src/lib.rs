@@ -74,6 +74,7 @@ pub enum DataKey {
     TotalNgos,
     /// The registry record keyed by an NGO owner's address.
     Ngo(Address),
+    /// The total number of NGO records stored in the registry.
     NgoCount,
 }
 
