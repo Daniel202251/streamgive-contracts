@@ -2,13 +2,24 @@
 
 Every event published by the contracts in this repo, with its topics and
 data shape, so an indexer can be written directly against this repo without
-going to `streamgive-docs` first.
+going to `streamgisve-docs` first.
 
 Soroban events have two parts:
 
 - **Topics** — a tuple, always starting with a `Symbol` naming the event.
+The contracts define migrated event declarations with Soroban SDK's
+`#[contractevent]` macro. Explicit topic names and data formats keep the wire
+layout stable. Event type names include `RegisterEvent`, `RenamedEvent`,
+`ApprovedEvent`, `RevokedEvent`, `UnregisteredEvent`, `ProposedAdminEvent`,
+`AcceptedAdminEvent`, `CancelledAdminEvent`, `PausedEvent`, `UnpausedEvent`,
+`TreasurySetEvent`, `FeeBpsSetEvent`, `TokenFeeBpsSetEvent`,
+`MaxStreamsPerDonorSetEvent`, `CreatedEvent`, `WithdrawnEvent`,
+`CancelledStreamEvent`, `RescuedStreamEvent`, `ToppedUpEvent`, and
+`RateModifiedEvent`.
+
+- **Topics** â€” a tuple, always starting with a `Symbol` naming the event.
   Topics are indexed/filterable.
-- **Data** — the event payload. Shown below as the Rust type(s) passed to
+- -- **Data** — the event payload. Shown below as the Rust type(s) passed to
   `env.events().publish((topics...), data)`. A single value publishes as
   itself; a tuple of values publishes as an XDR array in that order.
 
@@ -52,7 +63,41 @@ Emitted by `approve_ngo` when an admin marks a registered NGO as verified.
 | Topics | `("approved", ngo_owner: Address)` |
 | Data | `()` (no payload) |
 
+### `revoked`
+
+Emitted by `revoke_ngo` when an admin reverses a prior approval, marking a
+verified NGO as unverified again. This is the direct counterpart to
+`approved` for the same `ngo_owner` — an indexer should treat a `revoked`
+event as cancelling the most recent `approved` event for that address.
+
+| | |
+|---|---|
+| Topics | `("revoked", ngo_owner: Address)` |
+| Data | `()` (no payload) |
+
 ## `donation-vault`
+
+### `propadmin`
+
+Emitted by `propose_admin` when the current admin nominates a new admin.
+The transfer is not complete until the nominated address calls
+`accept_admin` and an `acptadmin` event is emitted.
+
+| | |
+|---|---|
+| Topics | `("propadmin",)` |
+| Data | `new_admin: Address` |
+
+### `acptadmin`
+
+Emitted by `accept_admin` when the nominated admin accepts the transfer.
+After this event the address in `data` is the active admin; the previous
+admin has no further authority.
+
+| | |
+|---|---|
+| Topics | `("acptadmin",)` |
+| Data | `new_admin: Address` |
 
 ### `pause`
 
@@ -72,6 +117,36 @@ Emitted by `unpause` when an admin lifts a pause.
 |---|---|
 | Topics | `("unpause",)` |
 | Data | `()` (no payload) |
+
+### `feeset`
+
+Emitted by `set_fee_bps` when an admin changes the protocol fee.
+
+| | |
+|---|---|
+| Topics | `("feeset",)` |
+| Data | `fee_bps: u32` (the new fee, in basis points) |
+
+The fee is capped at `MAX_FEE_BPS` (1,000 / 10%); calls above the cap fail
+with `FeeTooHigh` and emit nothing. The event carries the full new value
+(not a delta), so an indexer can track the fee without polling `fee_bps`.
+"Accepted" here means stored, not effective: the fee only affects payouts
+once a treasury is set, so pair this with `set_treasury`/`treasury()` when
+deriving an actual split.
+
+### `treasset`
+
+Emitted by `set_treasury` when an admin changes where protocol fees are paid.
+
+| | |
+|---|---|
+| Topics | `("treasset",)` |
+| Data | `treasury: Address` (the new treasury address) |
+
+The event carries the new treasury address so an off-chain indexer can track
+where protocol fees will flow without polling `treasury()`. Protocol fees only
+affect payouts once a treasury is configured, so pair this with `feeset`/`fee_bps()`
+when deriving an actual split.
 
 ### `created`
 
@@ -102,6 +177,10 @@ treasury in the same transaction. No separate fee event is emitted; derive
 the split from the vault's `fee_bps()`/`treasury()` at the time of the
 transaction.
 
+The `withdraw` entry point **returns** that same net amount (gross minus
+fee), so a caller displaying the payout can use the return value directly;
+the event data stays gross, matching the stream's `withdrawn` bookkeeping.
+
 ### `cancel`
 
 Emitted by `cancel_stream` when a donor stops a stream for good.
@@ -125,8 +204,7 @@ Emitted by `top_up` when a donor adds more funds to an existing stream.
 | Topics | `("topup", stream_id: u64)` |
 | Data | `amount: i128` |
 
-`amount` is only the newly added deposit. Any balance already accrued at
-the time of the top-up is settled to the NGO first (as its own implicit
+`amount` is only the newly added deposit. Any balance already accrued at the time of the top-up is settled to the NGO first (as its own implicit
 payout, without emitting a `withdraw` event) before the deposit is added.
 
 ### `ratemod`
@@ -137,7 +215,34 @@ rate.
 | | |
 |---|---|
 | Topics | `("ratemod", stream_id: u64)` |
-| Data | `new_rate: i128` |
+| Data | `(old_rate: i128, new_rate: i128)` |
 
 As with `top_up`, any balance already accrued at the old rate is settled to
-the NGO first, so the new rate only ever applies going forward.
+the NGO first, so the new rate only ever applies going forward. The event
+records both values so an indexer can calculate the change without another
+state query.
+
+### `transfer`
+
+Emitted by `transfer_stream` when a donor reassigns an ongoing stream to a
+different NGO.
+
+| | |
+|---|---|
+| Topics | `("transfer", stream_id: u64)` |
+| Data | `(old_ngo: Address, new_ngo: Address)` |
+
+Anything accrued to the old NGO before the transfer is settled to it as
+part of the call (subject to the same protocol-fee split as `withdraw`),
+without emitting a separate `withdraw` event. After this event, future
+accrual goes to the `new_ngo` in `data`. The donor and the stream's balance
+and rate are unchanged.
+
+### `unregist`
+
+Emitted by `ngo-registry` when an unverified NGO removes its own application.
+
+| | |
+|---|---|
+| Topics | `("unregist", owner: Address)` |
+| Data | `()` (no payload) |

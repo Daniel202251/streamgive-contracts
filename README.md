@@ -3,10 +3,31 @@
 Soroban smart contracts powering StreamGive, a recurring/streaming donation
 platform for verified NGOs on Stellar.
 
+For how these contracts fit with the backend and frontend — and how a
+donation flows end to end — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For who these contracts defend against, what the admin can and cannot do, and
+which risks are knowingly accepted, see
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
 ## Contracts
 
 - `ngo-registry` — on-chain NGO application, verification, and registry
 - `donation-vault` — streaming donation vault (create / withdraw / cancel / modify streams)
+
+### Donation-vault admin transfer
+
+Admin changes use a two-step handshake:
+
+1. The current admin calls `propose_admin(new_admin)`, which records the
+   pending administrator without changing the active admin.
+2. The proposed address calls `accept_admin()` to complete the transfer.
+3. Either side can abort the pending transfer by calling
+   `cancel_admin_proposal()` before acceptance; the active admin remains
+   unchanged.
+
+Only the current admin can propose or cancel a transfer, and only the pending
+administrator can accept it. The current admin continues to control
+admin-gated operations until acceptance succeeds.
 
 ## Release profile
 
@@ -30,6 +51,80 @@ these contracts costs:
 Change these with care: relaxing `opt-level`, `lto`, or `strip` grows the
 deployed wasm and raises fees, while turning `overflow-checks` off would
 let balance arithmetic wrap silently.
+
+## Pausing
+
+`donation-vault` has an admin-gated `pause` / `unpause` pair — an
+emergency brake for when something is wrong. `pause` only flips a flag in
+the instance storage: no funds are moved, so every balance stays exactly
+where it was and there is nothing to unwind when the pause is lifted.
+
+While the vault is paused, every entry point that moves tokens or changes
+touching storage or requiring any auth:
+Note that pausing does **not** stop time-based accrual. A stream's
+`pending_accrual` keeps growing while the vault is paused, so a stream
+paused for a week still owes a week of accrual once the pause is lifted.
+That accrual is claimable via `withdraw` as soon as the vault is
+unpaused.
+
+
+| Entry point     | While paused                                    |
+| --------------- | ----------------------------------------------- |
+| `create_stream` | Rejected                                        |
+| `withdraw`      | Rejected                                        |
+| `top_up`        | Rejected                                        |
+| `modify_rate`   | Rejected                                        |
+| `cancel_stream` | Still works — settles and refunds as usual      |
+
+
+`withdraw` being on that list is the point of the brake: it is the only
+path that pays tokens straight out of the vault, so a pause triggered by a
+suspected vulnerability has to close it or an attacker could simply drain
+funds while the rest of the contract is frozen.
+
+`cancel_stream` is deliberately left open. It is the one path that returns
+money to a donor, so keeping it available means a pause can never trap a
+donor's unspent deposit. The read-only views (`admin`, `pending_admin`,
+`get_stream`, `stream_count`, `pending_accrual`, `paused`, `treasury`,
+`fee_bps`) and `extend_stream` also keep working, since none of them can
+move funds, and `unpause` is of course still reachable.
+
+## Storage TTL and keeping entries alive
+
+Soroban contracts use bounded Time-To-Live (TTL) for on-chain state retention:
+
+- **Instance storage** (contract admins, configuration, pause flags) is bumped
+  to 30 days (`518,400` ledgers) on every state-changing call.
+- **Persistent storage** (each individual `Stream` record in `donation-vault` and
+  each `Ngo` record in `ngo-registry`) has an independent 90-day TTL (`1,555,200`
+  ledgers) that must be maintained per entry.
+
+### Expiry risk for idle entries
+
+If a stream has no activity (withdrawals, top-ups, rate modifications) or an NGO
+entry receives no updates for 90 consecutive days, its TTL expires and the network
+**archives** the entry.
+
+Archived entries cannot be read or modified by normal contract calls (`get_stream`,
+`withdraw`, verification lookups, etc. will fail) until a Soroban state restoration
+transaction is submitted and network restoration fees are paid. Long-running streams
+with low drip rates or infrequent withdrawals are especially at risk if left untouched.
+
+### Keep-alive entry points (`extend_stream` & `touch_ngo`)
+
+To protect idle entries from archival without moving funds, modifying balances, or
+requiring admin credentials, both contracts provide permissionless keep-alive entry
+points that anyone (donors, NGOs, keeper bots, or indexers) can invoke:
+
+- **`donation-vault::extend_stream(stream_id)`**: Extends the persistent storage
+  TTL of `DataKey::Stream(stream_id)` back to 90 days. Can be called at any time,
+  requires no authorization, and remains accessible even while the vault is paused.
+- **`ngo-registry::touch_ngo(owner)`**: Refreshes both the registry instance TTL
+  (to 30 days) and the NGO's persistent storage TTL (`DataKey::Ngo(owner)`) back
+  to 90 days without altering registration status. Requires no authorization.
+
+For full key specifications, bump thresholds, and archival lifecycle details, see
+[docs/STORAGE.md](docs/STORAGE.md).
 
 ## Related repositories
 
@@ -72,6 +167,42 @@ build, a wasm binary size check (see
 [`scripts/check-wasm-size.sh`](scripts/check-wasm-size.sh)), and
 `cargo test --workspace` on every push and pull request.
 
+## FAQ
+
+### Why is this project licensed under Apache-2.0?
+
+Apache-2.0 permits reuse and modification while providing an explicit patent
+license and clear contributor protections. That makes it a practical default
+for contracts intended to be integrated by wallets, applications, and other
+open-source projects.
+
+### Why are release overflow checks enabled?
+
+The contracts move token balances and calculate payouts with `i128`. A wrapped
+balance could silently corrupt funds, so release builds keep `overflow-checks`
+enabled and return explicit arithmetic errors where the contract can handle
+the failure.
+
+### Why are the contracts `no_std`?
+
+Soroban contracts run in a constrained WebAssembly environment. `no_std`
+keeps the deployed artifact small and avoids bringing operating-system
+facilities that are unavailable on-chain.
+
+### Why does each stream have its own TTL?
+
+Persistent storage is retained per key. A stream that is never touched can
+expire independently of the vault instance, so state-changing calls and the
+permissionless `extend_stream` entry point refresh the specific stream that
+needs to remain available.
+
+### What is the cancelled-stream grace period?
+
+The admin can configure `cancel_grace_ledgers` so indexers have additional
+time to observe and process a cancellation. Cancelling a stream retains its
+record for the normal stream TTL plus that configured grace period; a value of
+zero keeps the default retention period.
+
 ## Error codes
 
 Each contract exposes its failures as a `#[contracterror] enum Error`,
@@ -85,11 +216,22 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 1    | `AlreadyInitialized`  | `init` was already called; the vault already has an admin.               |
 | 2    | `NotInitialized`      | `init` has not been called yet, so there is no admin to act as.          |
 | 3    | `StreamNotFound`      | No stream exists for the given stream id.                                |
-| 4    | `InvalidAmount`       | `deposit` or `rate` passed to `create_stream` was zero or negative.      |
+| 4    | `InvalidAmount`       | `deposit` or `rate` passed to `create_stream`, the `amount` passed to `top_up`, or the `new_rate` passed to `modify_rate` was zero or negative. |
 | 5    | `NothingToWithdraw`   | The stream has accrued nothing since its last checkpoint.                |
-| 6    | `ContractPaused`      | The admin has paused the vault; only `cancel_stream` still works.        |
+| 6    | `ContractPaused`      | The admin has paused the vault; see [Pausing](#pausing) for what still works. |
 | 7    | `FeeTooHigh`          | `set_fee_bps` was called with a value above the 10% (1,000 bps) cap.     |
 | 8    | `NoPendingAdmin`      | `accept_admin` was called without a prior (or already-completed) `propose_admin`. |
+| 9    | `ArithmeticOverflow`  | A stream's `balance`/`withdrawn` or the stream-id counter would overflow. |
+| 10   | `InvalidTreasury`     | `set_treasury` was called with the vault's own address.                  |
+| 10   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`, which would stream the donor's own deposit back to them. |
+| 11   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 9    | `ArithmeticOverflow`  | A stream balance, withdrawn total, or stream ID would exceed its integer range. |
+| 10   | `DepositTooLow`       | `create_stream` was called with a deposit below the admin-configured minimum. |
+| 11   | `AlreadyPaused`       | `pause` was called when the vault was already paused. |
+| 12   | `AlreadyUnpaused`     | `unpause` was called when the vault was already active. |
+| 13   | `SelfStream`          | `create_stream` was called with the same address as both `donor` and `ngo`. |
+| 14   | `StreamCancelled`     | `top_up` or `modify_rate` was called on a stream that `cancel_stream` has already closed out. |
+| 15   | `InvalidAdmin`        | `propose_admin` was called with the current admin instead of a different address. |
 
 ### `ngo-registry`
 
@@ -99,6 +241,10 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 | 2    | `NotInitialized`      | `init` has not been called yet, so there is no admin to act as.  |
 | 3    | `AlreadyRegistered`   | `register` was called for an address that already has an entry. |
 | 4    | `NotRegistered`       | No registry entry exists for the given owner address.            |
+| 5    | `AlreadyVerified`     | An approved NGO cannot change its name.                         |
+| 6    | `NameTooLong`         | `register` was called with a name longer than 200 bytes.         |
+| 7    | `NotVerified`         | `revoke_ngo` was called on an NGO that isn't currently verified.  |
+| 8    | `NoPendingAdmin`      | `accept_admin` was called without a pending admin proposal.     |
 
 ## Status
 
