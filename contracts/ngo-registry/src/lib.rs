@@ -5,6 +5,11 @@ use soroban_sdk::{
     Env, String, Vec,
 };
 
+use common::{
+    DAY_IN_LEDGERS, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+    PERSISTENT_LIFETIME_THRESHOLD,
+};
+
 #[contractevent(topics = ["register"], data_format = "single-value")]
 pub struct RegisterEvent {
     #[topic]
@@ -236,16 +241,9 @@ pub const MAX_METADATA_URI_LEN: u32 = 512;
 /// pagination bounded.
 pub const MAX_LIST_LIMIT: u32 = 50;
 
-/// Approximate ledgers per day at a 5-second close time. Used to express
-/// storage TTLs (which the network counts in ledgers, not wall time) in
-/// human terms.
-const DAY_IN_LEDGERS: u32 = 17_280;
-
-const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
-
-const NGO_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
-const NGO_LIFETIME_THRESHOLD: u32 = NGO_BUMP_AMOUNT - DAY_IN_LEDGERS;
+/// NGO-specific bump and threshold amounts, using the 90-day persistent entry constants.
+const NGO_BUMP_AMOUNT: u32 = PERSISTENT_BUMP_AMOUNT;
+const NGO_LIFETIME_THRESHOLD: u32 = PERSISTENT_LIFETIME_THRESHOLD;
 
 fn extend_instance_ttl(env: &Env) {
     env.storage()

@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["contracts/*"]
 
+[workspace.dependencies]
+common = { path = "contracts/common" }
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true
