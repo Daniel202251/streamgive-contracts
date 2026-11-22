@@ -84,6 +84,23 @@ pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+#[contractevent(topics = ["uppropose"], data_format = "single-value")]
+pub struct UpgradeProposedEvent {
+    #[topic]
+    pub new_wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
+#[contractevent(topics = ["upcancel"], data_format = "single-value")]
+pub struct UpgradeCancelledEvent {
+    pub new_wasm_hash: BytesN<32>,
+}
+
+#[contractevent(topics = ["updelay"], data_format = "single-value")]
+pub struct UpgradeDelaySetEvent {
+    pub delay: u64,
+}
+
 #[contractevent(topics = ["apadd"], data_format = "single-value")]
 pub struct ApproverAddedEvent {
     #[topic]
@@ -152,6 +169,17 @@ pub struct NgoOwnerPage {
     pub next: u32,
 }
 
+/// A contract upgrade recorded by `propose_upgrade`, awaiting the timelock
+/// before `execute_upgrade` may carry it out.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingUpgrade {
+    /// The Wasm hash the contract will be upgraded to on execution.
+    pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp at or after which `execute_upgrade` may run.
+    pub executable_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
@@ -181,6 +209,13 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
+    /// Seconds that must elapse between `propose_upgrade` and
+    /// `execute_upgrade`. Zero (or absent) means the timelock is disabled and
+    /// the immediate `upgrade` entry point is allowed.
+    UpgradeDelay,
+    /// The upgrade recorded by `propose_upgrade` and not yet executed or
+    /// cancelled. Absent means no upgrade is pending.
+    PendingUpgrade,
 }
 
 #[contracterror]
@@ -219,6 +254,16 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
+    /// `execute_upgrade` or `cancel_upgrade` was called with no upgrade
+    /// proposed.
+    NoPendingUpgrade = 16,
+    /// `execute_upgrade` was called before the proposed upgrade's timelock
+    /// elapsed.
+    UpgradeDelayNotElapsed = 17,
+    /// The immediate `upgrade` entry point was called while a non-zero
+    /// `upgrade_delay` is configured: upgrades must go through
+    /// `propose_upgrade` / `execute_upgrade`.
+    UpgradeTimelockEnabled = 18,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -303,6 +348,18 @@ fn set_verified_count(env: &Env, count: u64) {
 fn get_verify_period(env: &Env) -> u64 {
     env.storage()
         .instance()
+        .get(&DataKey::VerifyPeriod)
+        .unwrap_or(0)
+}
+
+/// Reads the admin-configured upgrade timelock, in seconds. Defaults to zero
+/// (timelock disabled) when an admin has not set one.
+fn get_upgrade_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::UpgradeDelay)
+        .unwrap_or(0)
+}
         .get(&DataKey::VerifyPeriod)
         .unwrap_or(0)
 }
@@ -1832,6 +1889,11 @@ impl NgoRegistry {
     /// Lets a bug fix be deployed without changing the contract address,
     /// preserving every existing NGO entry and the admin key.
     ///
+    /// Only allowed while the upgrade timelock is explicitly disabled (the
+    /// configured `upgrade_delay` is zero). With a non-zero delay, upgrades
+    /// must go through `propose_upgrade` / `execute_upgrade` to provide a
+    /// warning period; this returns `Error::UpgradeTimelockEnabled` otherwise.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -1848,9 +1910,119 @@ impl NgoRegistry {
     /// ```
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
+        if get_upgrade_delay(&env) != 0 {
+            return Err(Error::UpgradeTimelockEnabled);
+        }
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
+        extend_instance_ttl(&env);
         UpgradedEvent { new_wasm_hash }.publish(&env);
+        Ok(())
+    }
+
+    /// Reads the configured upgrade delay in seconds. `0` means the timelock
+    /// is disabled and the immediate `upgrade` entry point is allowed.
+    pub fn upgrade_delay(env: Env) -> u64 {
+        get_upgrade_delay(&env)
+    }
+
+    /// Reads the upgrade proposed by `propose_upgrade`, if one is awaiting its
+    /// timelock. `None` when nothing is pending.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Sets how many seconds must pass between `propose_upgrade` and
+    /// `execute_upgrade`. Admin-gated; emits an `updelay` event. Setting it to
+    /// zero explicitly disables the timelock and re-enables the immediate
+    /// `upgrade` entry point.
+    pub fn set_upgrade_delay(env: Env, delay: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::UpgradeDelay, &delay);
+        extend_instance_ttl(&env);
+
+        UpgradeDelaySetEvent { delay }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Starts a timelocked upgrade by recording `new_wasm_hash` as pending, to
+    /// be carried out by `execute_upgrade` no earlier than the configured
+    /// `upgrade_delay` seconds from now. Admin-gated; emits an `uppropose`
+    /// event. Proposing again replaces any pending proposal and restarts the
+    /// timer.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        let delay = get_upgrade_delay(&env);
+        let executable_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(delay)
+            .ok_or(Error::ArithmeticOverflow)?;
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                new_wasm_hash: new_wasm_hash.clone(),
+                executable_at,
+            },
+        );
+        extend_instance_ttl(&env);
+
+        UpgradeProposedEvent {
+            new_wasm_hash,
+            executable_at,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Carries out the upgrade proposed by `propose_upgrade`, replacing the
+    /// contract's Wasm bytecode in place. Admin-gated; emits an `upgrade`
+    /// event. Fails with `NoPendingUpgrade` when nothing is proposed, and with
+    /// `UpgradeDelayNotElapsed` before the timelock has elapsed.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::NoPendingUpgrade)?;
+        if env.ledger().timestamp() < pending.executable_at {
+            return Err(Error::UpgradeDelayNotElapsed);
+        }
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.deployer()
+            .update_current_contract_wasm(pending.new_wasm_hash.clone());
+        extend_instance_ttl(&env);
+
+        UpgradedEvent {
+            new_wasm_hash: pending.new_wasm_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels the upgrade proposed by `propose_upgrade`. Admin-gated; emits
+    /// an `upcancel` event. Fails with `NoPendingUpgrade` when nothing is
+    /// proposed.
+    pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::NoPendingUpgrade)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        extend_instance_ttl(&env);
+
+        UpgradeCancelledEvent {
+            new_wasm_hash: pending.new_wasm_hash,
+        }
+        .publish(&env);
+
         Ok(())
     }
 }
