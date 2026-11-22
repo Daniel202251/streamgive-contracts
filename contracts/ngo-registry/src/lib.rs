@@ -135,6 +135,27 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
+#[contractevent(topics = ["ownprop"], data_format = "vec")]
+pub struct OwnershipProposedEvent {
+    #[topic]
+    pub current_owner: Address,
+    pub new_owner: Address,
+}
+
+#[contractevent(topics = ["ownaccpt"], data_format = "vec")]
+pub struct OwnershipAcceptedEvent {
+    #[topic]
+    pub old_owner: Address,
+    pub new_owner: Address,
+}
+
+#[contractevent(topics = ["owncancel"], data_format = "single-value")]
+pub struct OwnershipCancelledEvent {
+    #[topic]
+    pub owner: Address,
+    pub data: (),
+}
+
 #[contracttype]
 // Debug and PartialEq let tests assert_eq! on a try_* call’s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
@@ -155,6 +176,10 @@ pub struct Ngo {
     /// reaches it the entry is treated as unverified by `is_verified` and
     /// `get_ngo`, until an admin renews it. See issue #348.
     pub verified_until: Option<u64>,
+    /// Optional pending new owner address. Set by `propose_owner_transfer` and
+    /// cleared by `accept_owner_transfer` or `cancel_owner_transfer`. `None` means
+    /// no ownership transfer is pending.
+    pub pending_owner: Option<Address>,
 }
 
 /// A single page of the NGO owners index, returned by `list_ngos_page`.
@@ -871,6 +896,7 @@ impl NgoRegistry {
             verified: false,
             metadata_uri: None,
             verified_until: None,
+            pending_owner: None,
         };
         env.storage().persistent().set(&key, &ngo);
 
@@ -2020,6 +2046,145 @@ impl NgoRegistry {
 
         UpgradeCancelledEvent {
             new_wasm_hash: pending.new_wasm_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Proposes a new owner for the NGO entry. The current owner initiates the
+    /// transfer, and the new owner must accept it via `accept_owner_transfer`.
+    /// The verified status is preserved through the transfer. Owner-gated; emits
+    /// an `ownprop` event.
+    pub fn propose_owner_transfer(env: Env, current_owner: Address, new_owner: Address) -> Result<(), Error> {
+        current_owner.require_auth();
+
+        if current_owner == new_owner {
+            return Err(Error::InvalidAdmin); // Reusing error for invalid transfer
+        }
+
+        let key = DataKey::Ngo(current_owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        ngo.pending_owner = Some(new_owner.clone());
+        env.storage().persistent().set(&key, &ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &current_owner);
+
+        OwnershipProposedEvent {
+            current_owner,
+            new_owner,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Accepts a proposed ownership transfer. The new owner (pending_owner) must
+    /// call this to complete the transfer. The NGO entry is moved to be keyed by
+    /// the new owner's address, and the verified status is preserved. Emits an
+    /// `ownaccpt` event.
+    pub fn accept_owner_transfer(env: Env, old_owner: Address, new_owner: Address) -> Result<(), Error> {
+        new_owner.require_auth();
+
+        let old_key = DataKey::Ngo(old_owner.clone());
+        let ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .ok_or(Error::NotRegistered)?;
+
+        // Verify the new_owner matches the pending_owner
+        if ngo.pending_owner != Some(new_owner.clone()) {
+            return Err(Error::NoPendingAdmin); // Reusing error for no pending transfer
+        }
+
+        // Check if new_owner already has an NGO registered
+        let new_key = DataKey::Ngo(new_owner.clone());
+        if env.storage().persistent().has(&new_key) {
+            return Err(Error::AlreadyRegistered);
+        }
+
+        // Create the new entry with updated owner and no pending_owner
+        let updated_ngo = Ngo {
+            owner: new_owner.clone(),
+            name: ngo.name.clone(),
+            verified: ngo.verified,
+            metadata_uri: ngo.metadata_uri.clone(),
+            verified_until: ngo.verified_until,
+            pending_owner: None,
+        };
+
+        // Remove the old entry
+        env.storage().persistent().remove(&old_key);
+
+        // Update the owner index
+        if let Some(index) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::IndexByOwner(old_owner.clone()))
+        {
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerByIndex(index), &new_owner);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::IndexByOwner(old_owner.clone()));
+            env.storage()
+                .persistent()
+                .set(&DataKey::IndexByOwner(new_owner.clone()), &index);
+            extend_owner_index_ttl(&env, index, &new_owner);
+        }
+
+        // Store the new entry
+        env.storage().persistent().set(&new_key, &updated_ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &new_owner);
+
+        // Update vault expectations: the vault will need to handle this
+        // by allowing withdrawals to either the old or new owner during a grace period
+        // or by having the NGO update their payout address
+
+        OwnershipAcceptedEvent {
+            old_owner,
+            new_owner,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels a pending ownership transfer. The current owner can call this to
+    /// withdraw the proposal. Emits an `owncancel` event.
+    pub fn cancel_owner_transfer(env: Env, owner: Address) -> Result<(), Error> {
+        owner.require_auth();
+
+        let key = DataKey::Ngo(owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        if ngo.pending_owner.is_none() {
+            return Err(Error::NoPendingAdmin); // Reusing error for no pending transfer
+        }
+
+        ngo.pending_owner = None;
+        env.storage().persistent().set(&key, &ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &owner);
+
+        OwnershipCancelledEvent {
+            owner,
+            data: (),
         }
         .publish(&env);
 
