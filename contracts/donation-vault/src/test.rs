@@ -6551,6 +6551,73 @@ fn withdraw_batch_emits_drained_event_for_every_emptied_stream() {
 }
 
 #[test]
+#[ignore] // TODO: Requires custom mock token that can fail on specific transfer call
+fn withdraw_batch_is_atomic_on_token_transfer_failure() {
+    // This test verifies that withdraw_batch is atomic: if any token transfer
+    // fails, the entire transaction must revert and leave all streams unchanged.
+    //
+    // Test scenario:
+    // 1. Create 3 streams with accrued amounts
+    // 2. Use a mock token that fails on the 2nd transfer
+    // 3. Call withdraw_batch on all 3 streams
+    // 4. Verify that the call fails
+    // 5. Verify that NO stream's last_update or withdrawn was changed
+    // 6. Verify that NO tokens were transferred
+    //
+    // Implementation note: This requires a custom token contract that can be
+    // configured to fail on a specific transfer call. The Soroban SDK's
+    // built-in token doesn't support this, so this test is marked as ignored
+    // until proper mock infrastructure is available.
+    
+    let s = setup();
+    s.token_admin.mint(&s.donor, &3_000);
+    
+    // Create 3 streams
+    let stream1 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let stream2 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let stream3 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    
+    // Let some time pass so all streams accrue
+    s.env.ledger().with_mut(|l| l.timestamp += 50);
+    
+    // Record state before batch withdrawal
+    let stream1_before = s.client.get_stream(&stream1);
+    let stream2_before = s.client.get_stream(&stream2);
+    let stream3_before = s.client.get_stream(&stream3);
+    let ngo_balance_before = s.token.balance(&s.ngo);
+    let vault_balance_before = s.token.balance(&s.client.address);
+    
+    // TODO: Replace with failing mock token
+    // let failing_token = create_failing_token(&s.env, 2); // Fails on 2nd transfer
+    
+    // Try to withdraw all 3 streams - should fail and revert
+    let mut ids = Vec::new(&s.env);
+    ids.push_back(stream1);
+    ids.push_back(stream2);
+    ids.push_back(stream3);
+    
+    // TODO: This should fail when using failing token
+    // let result = s.client.try_withdraw_batch(&ids);
+    // assert!(result.is_err());
+    
+    // Verify atomicity: NO streams should have changed
+    let stream1_after = s.client.get_stream(&stream1);
+    let stream2_after = s.client.get_stream(&stream2);
+    let stream3_after = s.client.get_stream(&stream3);
+    
+    assert_eq!(stream1_before.last_update, stream1_after.last_update);
+    assert_eq!(stream1_before.withdrawn, stream1_after.withdrawn);
+    assert_eq!(stream2_before.last_update, stream2_after.last_update);
+    assert_eq!(stream2_before.withdrawn, stream2_after.withdrawn);
+    assert_eq!(stream3_before.last_update, stream3_after.last_update);
+    assert_eq!(stream3_before.withdrawn, stream3_after.withdrawn);
+    
+    // Verify NO tokens were transferred
+    assert_eq!(s.token.balance(&s.ngo), ngo_balance_before);
+    assert_eq!(s.token.balance(&s.client.address), vault_balance_before);
+}
+
+#[test]
 fn modify_rate_that_empties_stream_emits_drained_event() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
