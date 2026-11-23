@@ -1273,10 +1273,10 @@ fn list_ngos_one_ngo() {
 fn list_ngos_across_page_boundaries() {
     let (env, client, _admin) = setup();
     let mut owners = soroban_sdk::vec![&env];
-    for _ in 0..5 {
+    let names = ["NGO 1", "NGO 2", "NGO 3", "NGO 4", "NGO 5"];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        let name = String::from_str(&env, "NGO");
-        client.register(&owner, &name);
+        client.register(&owner, &String::from_str(&env, name_str));
         owners.push_back(owner);
     }
 
@@ -1313,9 +1313,17 @@ fn list_ngos_limit_larger_than_cap_is_clamped_to_max_limit() {
     let (env, client, _admin) = setup();
     // Register 55 NGOs (> MAX_LIST_LIMIT = 50)
     let mut registered = soroban_sdk::vec![&env];
-    for _ in 0..55 {
+    let names = [
+        "NGO 01","NGO 02","NGO 03","NGO 04","NGO 05","NGO 06","NGO 07","NGO 08","NGO 09","NGO 10",
+        "NGO 11","NGO 12","NGO 13","NGO 14","NGO 15","NGO 16","NGO 17","NGO 18","NGO 19","NGO 20",
+        "NGO 21","NGO 22","NGO 23","NGO 24","NGO 25","NGO 26","NGO 27","NGO 28","NGO 29","NGO 30",
+        "NGO 31","NGO 32","NGO 33","NGO 34","NGO 35","NGO 36","NGO 37","NGO 38","NGO 39","NGO 40",
+        "NGO 41","NGO 42","NGO 43","NGO 44","NGO 45","NGO 46","NGO 47","NGO 48","NGO 49","NGO 50",
+        "NGO 51","NGO 52","NGO 53","NGO 54","NGO 55",
+    ];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
+        client.register(&owner, &String::from_str(&env, name_str));
         registered.push_back(owner);
     }
 
@@ -1411,9 +1419,10 @@ fn list_ngos_unregister_last_and_only_entry() {
 fn list_ngos_page_first_page_returns_next_start() {
     let (env, client, _admin) = setup();
     let mut owners = soroban_sdk::vec![&env];
-    for _ in 0..5 {
+    let names = ["Org Alpha", "Org Beta", "Org Gamma", "Org Delta", "Org Epsilon"];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
+        client.register(&owner, &String::from_str(&env, name_str));
         owners.push_back(owner);
     }
 
@@ -1429,9 +1438,10 @@ fn list_ngos_page_first_page_returns_next_start() {
 fn list_ngos_page_last_page_next_reaches_total() {
     let (env, client, _admin) = setup();
     let mut owners = soroban_sdk::vec![&env];
-    for _ in 0..5 {
+    let names = ["Org Alpha", "Org Beta", "Org Gamma", "Org Delta", "Org Epsilon"];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
+        client.register(&owner, &String::from_str(&env, name_str));
         owners.push_back(owner);
     }
 
@@ -1447,9 +1457,10 @@ fn list_ngos_page_last_page_next_reaches_total() {
 #[test]
 fn list_ngos_page_full_final_page_next_reaches_total() {
     let (env, client, _admin) = setup();
-    for _ in 0..4 {
+    let names = ["Org Alpha", "Org Beta", "Org Gamma", "Org Delta"];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
+        client.register(&owner, &String::from_str(&env, name_str));
     }
 
     // A page that exactly fills the limit can still be the last: `next` hits
@@ -1487,9 +1498,10 @@ fn list_ngos_page_empty_registry_returns_total_zero() {
 fn list_ngos_page_walks_whole_index_via_next() {
     let (env, client, _admin) = setup();
     let mut owners = soroban_sdk::vec![&env];
-    for _ in 0..7 {
+    let names = ["Org 1", "Org 2", "Org 3", "Org 4", "Org 5", "Org 6", "Org 7"];
+    for name_str in names.iter() {
         let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
+        client.register(&owner, &String::from_str(&env, name_str));
         owners.push_back(owner);
     }
 
@@ -2811,12 +2823,6 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
-env);
-
-    client.register(&owner, &String::from_str(&env, "Red Cross"));
-
-    assert_ttls_bumped(&env, &client, &owner);
-}
 
 // =============================================================================
 // Test for list_ngos handling removed entries (Issue 4)
@@ -2824,68 +2830,265 @@ env);
 
 #[test]
 fn list_ngos_handles_removed_entries_correctly() {
-    let (env, client, admin) = setup();
-    
-    // Register 5 NGOs
-    let owners: Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
-    
-    for (i, owner) in owners.iter().enumerate() {
-        let name = String::from_str(&env, &format!("NGO {}", i));
-        client.register(owner, &name);
+    let (env, client, _admin) = setup();
+
+    // Register 5 NGOs with distinct names.
+    let names = ["Charity A", "Charity B", "Charity C", "Charity D", "Charity E"];
+    let mut owners = soroban_sdk::vec![&env];
+    for name_str in names.iter() {
+        let owner = Address::generate(&env);
+        client.register(&owner, &String::from_str(&env, name_str));
+        owners.push_back(owner);
     }
-    
-    // Verify we have 5 NGOs registered
-    let initial_count = client.ngo_count();
-    assert_eq!(initial_count, 5);
-    
-    // Get the initial list of all NGOs
+
+    // Verify we have 5 NGOs registered.
+    assert_eq!(client.ngo_count(), 5);
+
     let initial_page = client.list_ngos_page(&0, &10);
     assert_eq!(initial_page.owners.len(), 5);
     assert_eq!(initial_page.next, 5);
-    
-    // Remove the NGO from the middle (index 2)
-    let middle_owner = &owners[2];
-    client.remove_ngo(middle_owner);
-    
-    // Verify count decreased
-    let after_removal_count = client.ngo_count();
-    assert_eq!(after_removal_count, 4);
-    
-    // List NGOs after removal
+
+    // Remove the NGO from the middle (index 2).
+    let middle_owner = owners.get(2).unwrap();
+    client.remove_ngo(&middle_owner);
+
+    // Count decreased.
+    assert_eq!(client.ngo_count(), 4);
+
     let after_removal_page = client.list_ngos_page(&0, &10);
     assert_eq!(after_removal_page.owners.len(), 4);
     assert_eq!(after_removal_page.next, 4);
-    
-    // Verify the removed NGO is not in the list
-    assert!(!after_removal_page.owners.contains(middle_owner));
-    
-    // Verify the other NGOs are still accessible
-    for (i, owner) in owners.iter().enumerate() {
-        if i != 2 {
-            // All NGOs except the removed one should still be accessible
-            assert!(client.try_get_ngo(owner).is_ok());
+
+    // The removed NGO is not in the list.
+    assert!(!after_removal_page.owners.contains(&middle_owner));
+
+    // The other NGOs are still accessible; the removed one is not.
+    for i in 0..5u32 {
+        let owner = owners.get(i).unwrap();
+        if i == 2 {
+            assert_eq!(client.try_get_ngo(&owner), Err(Ok(Error::NotRegistered)));
         } else {
-            // The removed NGO should not be found
-            assert_eq!(client.try_get_ngo(owner), Err(Ok(Error::NotRegistered)));
+            assert!(client.try_get_ngo(&owner).is_ok());
         }
     }
-    
-    // Test pagination with removed entry
+
+    // Pagination is consistent after removal.
     let first_page = client.list_ngos_page(&0, &2);
     assert_eq!(first_page.owners.len(), 2);
     assert_eq!(first_page.next, 2);
-    
+
     let second_page = client.list_ngos_page(&2, &2);
     assert_eq!(second_page.owners.len(), 2);
     assert_eq!(second_page.next, 4);
-    
-    // All pages together should have 4 unique NGOs
-    let mut all_owners_after = first_page.owners.to_vec();
-    all_owners_after.extend(second_page.owners.to_vec());
-    assert_eq!(all_owners_after.len(), 4);
-    
-    // Verify consistency: no duplicates and middle owner not present
-    for owner in all_owners_after.iter() {
-        assert_ne!(owner, middle_owner);
-    }
+
+    // The middle owner does not appear on either page.
+    assert!(!first_page.owners.contains(&middle_owner));
+    assert!(!second_page.owners.contains(&middle_owner));
+}
+
+// =============================================================================
+// name uniqueness (fix/registry-unique-names)
+// =============================================================================
+
+#[test]
+fn register_duplicate_name_exact_match_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // A second registrant with the identical name must be rejected.
+    let result = client.try_register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_duplicate_name_case_folded_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // All-uppercase canonical form matches the existing name.
+    assert_eq!(
+        client.try_register(&b, &String::from_str(&env, "RED CROSS")),
+        Err(Ok(Error::NameTaken))
+    );
+    // Mixed case also matches.
+    assert_eq!(
+        client.try_register(&c, &String::from_str(&env, "rEd cRoSs")),
+        Err(Ok(Error::NameTaken))
+    );
+    // Neither registrant was stored.
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+    assert_eq!(client.try_get_ngo(&c), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_duplicate_name_trimmed_whitespace_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // Leading/trailing ASCII spaces collapse to the same canonical key.
+    let result = client.try_register(&b, &String::from_str(&env, "  Red Cross  "));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_different_names_both_succeed() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    assert_eq!(
+        client.get_ngo(&a).name,
+        String::from_str(&env, "Red Cross")
+    );
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+    assert_eq!(client.total_ngos(), 2);
+}
+
+#[test]
+fn update_name_to_taken_name_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    // B tries to rename itself to A's existing name.
+    let result = client.try_update_name(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+
+    // B's name is unchanged.
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+}
+
+#[test]
+fn update_name_to_taken_name_case_folded_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    assert_eq!(
+        client.try_update_name(&b, &String::from_str(&env, "RED CROSS")),
+        Err(Ok(Error::NameTaken))
+    );
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+}
+
+#[test]
+fn update_name_to_own_current_name_is_noop_no_error() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    // Updating to the same name does not trigger NameTaken — it short-circuits
+    // before the uniqueness check because the name hasn't changed.
+    client.update_name(&owner, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&owner).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn unregister_frees_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.unregister(&a);
+
+    // The name is now free — a different address should be able to register it.
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn remove_ngo_frees_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.remove_ngo(&a);
+
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn reject_ngo_frees_name_so_another_can_claim_it() {
+    let (env, client, admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.reject_ngo(&admin, &a, &1);
+
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn update_name_frees_old_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.update_name(&a, &String::from_str(&env, "Red Cross UK"));
+
+    // "Red Cross" is now free — b can take it.
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+    // a still holds "Red Cross UK".
+    assert_eq!(
+        client.get_ngo(&a).name,
+        String::from_str(&env, "Red Cross UK")
+    );
+}
+
+#[test]
+fn name_uniqueness_is_enforced_across_case_and_whitespace_together() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    // Register with leading space and mixed case.
+    client.register(&a, &String::from_str(&env, "  Red Cross  "));
+
+    // Exact trimmed lowercase match must still be blocked.
+    let result = client.try_register(&b, &String::from_str(&env, "red cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
 }

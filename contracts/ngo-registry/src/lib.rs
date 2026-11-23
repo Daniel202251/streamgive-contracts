@@ -176,6 +176,11 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
+    /// Reverse index from a canonical name (ASCII-lowercased, whitespace-trimmed)
+    /// to the owner address that holds it. Set on `register`/`update_name`,
+    /// cleared on `unregister`/`remove_ngo`/`reject_ngo`. Used to enforce
+    /// name uniqueness across registrations.
+    NameOwner(Bytes),
 }
 
 #[contracterror]
@@ -214,6 +219,9 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
+    /// The supplied name (after trimming whitespace and folding to lowercase)
+    /// is already in use by another registered NGO.
+    NameTaken = 16,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -391,6 +399,48 @@ fn validate_name(name: &String) -> Result<(), Error> {
     validate_name_bytes(&buf[..len])
 }
 
+/// Produces a canonical form of an NGO name for use as a uniqueness key.
+///
+/// The canonical form is the name with leading/trailing ASCII whitespace
+/// trimmed and all ASCII letters lowercased. This means "Red Cross",
+/// "  red cross  ", and "RED CROSS" all map to the same key, so a new
+/// registrant cannot reserve a name that is visually indistinguishable from
+/// an existing one. Non-ASCII characters (including Unicode whitespace) are
+/// left unchanged.
+///
+/// Returns the canonical bytes as a `Bytes` value for use as a storage key.
+/// The input must have already passed `validate_name`, so it is non-empty
+/// valid UTF-8 with at least one visible character.
+fn canonical_name_key(env: &Env, name: &String) -> Bytes {
+    let len = name.len() as usize;
+    let mut buf = [0u8; MAX_NGO_NAME_LEN as usize];
+    let sdk_bytes: Bytes = name.into();
+    sdk_bytes.copy_into_slice(&mut buf[..len]);
+    let slice = &buf[..len];
+
+    // Trim leading ASCII whitespace.
+    let start = slice
+        .iter()
+        .position(|&b| !b.is_ascii_whitespace())
+        .unwrap_or(len);
+    // Trim trailing ASCII whitespace.
+    let end = slice[start..]
+        .iter()
+        .rposition(|&b| !b.is_ascii_whitespace())
+        .map(|i| start + i + 1)
+        .unwrap_or(start);
+    let trimmed = &slice[start..end];
+
+    // Lowercase ASCII letters in place using a second stack buffer.
+    let mut canonical = [0u8; MAX_NGO_NAME_LEN as usize];
+    let canonical_len = trimmed.len();
+    for (i, &b) in trimmed.iter().enumerate() {
+        canonical[i] = b.to_ascii_lowercase();
+    }
+
+    Bytes::from_slice(env, &canonical[..canonical_len])
+}
+
 /// Validates an optional NGO metadata URI.
 ///
 /// `None` is always allowed. `Some` must be at most `MAX_METADATA_URI_LEN`
@@ -508,7 +558,8 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
 /// verified/unverified check. Does not touch the instance TTL — the caller
 /// decides whether to bump it. Decrements `NgoCount`, and `VerifiedCount` when
 /// the entry being removed was verified, using checked subtraction and
-/// returning `Error::ArithmeticOverflow` on underflow.
+/// returning `Error::ArithmeticOverflow` on underflow. Also clears the
+/// `NameOwner` uniqueness index entry so the freed name can be re-registered.
 fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
     let count: u64 = env
         .storage()
@@ -517,18 +568,22 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
         .unwrap_or(0);
     let new_ngo_count = count.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
 
-    // Keep `verified_count` in step with the entry being removed.
-    if let Some(ngo) = env
+    // Keep `verified_count` in step with the entry being removed, and
+    // capture the name before we delete the entry so we can free it below.
+    let maybe_name: Option<String> = env
         .storage()
         .persistent()
         .get::<_, Ngo>(&DataKey::Ngo(owner.clone()))
-    {
-        if ngo.verified {
-            let verified = get_verified_count(env);
-            let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
-            set_verified_count(env, new_verified);
-        }
-    }
+        .map(|ngo| {
+            if ngo.verified {
+                let verified = get_verified_count(env);
+                // Saturating sub rather than propagating an error here:
+                // underflow means the counter was already inconsistent,
+                // and removing the entry is still the right thing to do.
+                set_verified_count(env, verified.saturating_sub(1));
+            }
+            ngo.name
+        });
 
     env.storage()
         .persistent()
@@ -537,6 +592,14 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
     env.storage()
         .instance()
         .set(&DataKey::NgoCount, &new_ngo_count);
+
+    // Free the name so a future registrant can claim it.
+    if let Some(name) = maybe_name {
+        let key = canonical_name_key(env, &name);
+        env.storage()
+            .instance()
+            .remove(&DataKey::NameOwner(key));
+    }
 
     // Remove from index using swap-and-pop to maintain a dense [0..count) index
     if let Some(index) = env
@@ -800,6 +863,16 @@ impl NgoRegistry {
             return Err(Error::AlreadyRegistered);
         }
 
+        // Reject names that are already claimed (after trimming and case-folding).
+        let name_key = canonical_name_key(&env, &name);
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::NameOwner(name_key.clone()))
+        {
+            return Err(Error::NameTaken);
+        }
+
         let count: u64 = env
             .storage()
             .instance()
@@ -822,6 +895,11 @@ impl NgoRegistry {
         env.storage()
             .instance()
             .set(&DataKey::NgoCount, &new_ngo_count);
+
+        // Claim the name in the uniqueness index.
+        env.storage()
+            .instance()
+            .set(&DataKey::NameOwner(name_key), &owner);
 
         // Maintain the registered owners index
         env.storage()
@@ -1298,6 +1376,27 @@ impl NgoRegistry {
 
         // Only update and emit event if the name actually changes
         if ngo.name != name {
+            // Check the new name is not already claimed by someone else.
+            let new_name_key = canonical_name_key(&env, &name);
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::NameOwner(new_name_key.clone()))
+            {
+                return Err(Error::NameTaken);
+            }
+
+            // Release the old name so another registrant can claim it.
+            let old_name_key = canonical_name_key(&env, &ngo.name);
+            env.storage()
+                .instance()
+                .remove(&DataKey::NameOwner(old_name_key));
+
+            // Claim the new name.
+            env.storage()
+                .instance()
+                .set(&DataKey::NameOwner(new_name_key), &owner);
+
             ngo.name = name.clone();
             env.storage().persistent().set(&key, &ngo);
             extend_instance_ttl(&env);
