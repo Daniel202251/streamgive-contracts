@@ -113,6 +113,55 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
+#[contractevent(topics = ["catset"], data_format = "single-value")]
+pub struct CategoriesSetEvent {
+    #[topic]
+    pub owner: Address,
+    /// The new bitmask value. Each set bit corresponds to one `NgoCategory`
+    /// constant; zero means no categories assigned.
+    pub categories: u32,
+}
+
+/// NGO category bitmask constants.
+///
+/// Each constant is a single bit. An NGO's `categories` field is the bitwise
+/// OR of whichever categories apply. Zero means uncategorised.
+///
+/// | Bit | Constant              | Meaning                             |
+/// |-----|-----------------------|-------------------------------------|
+/// | 0   | `CATEGORY_HEALTH`     | Healthcare and medical services     |
+/// | 1   | `CATEGORY_EDUCATION`  | Education and literacy              |
+/// | 2   | `CATEGORY_ENVIRONMENT`| Environment and climate             |
+/// | 3   | `CATEGORY_HUMANITAR`  | Humanitarian aid and disaster relief|
+/// | 4   | `CATEGORY_ANIMALS`    | Animal welfare                      |
+/// | 5   | `CATEGORY_ARTS`       | Arts, culture, and heritage         |
+/// | 6   | `CATEGORY_COMMUNITY`  | Community development               |
+/// | 7   | `CATEGORY_RESEARCH`   | Research and science                |
+///
+/// Bits 8–31 are reserved for future categories and must be zero in any value
+/// passed to `set_categories`; a non-zero reserved bit causes
+/// `Error::InvalidCategories`.
+pub const CATEGORY_HEALTH: u32 = 1 << 0;
+pub const CATEGORY_EDUCATION: u32 = 1 << 1;
+pub const CATEGORY_ENVIRONMENT: u32 = 1 << 2;
+pub const CATEGORY_HUMANITAR: u32 = 1 << 3;
+pub const CATEGORY_ANIMALS: u32 = 1 << 4;
+pub const CATEGORY_ARTS: u32 = 1 << 5;
+pub const CATEGORY_COMMUNITY: u32 = 1 << 6;
+pub const CATEGORY_RESEARCH: u32 = 1 << 7;
+
+/// The union of every defined category bit. Any bit set in a caller-supplied
+/// value that is *not* in this mask is a reserved bit and causes
+/// `Error::InvalidCategories`.
+pub const VALID_CATEGORY_MASK: u32 = CATEGORY_HEALTH
+    | CATEGORY_EDUCATION
+    | CATEGORY_ENVIRONMENT
+    | CATEGORY_HUMANITAR
+    | CATEGORY_ANIMALS
+    | CATEGORY_ARTS
+    | CATEGORY_COMMUNITY
+    | CATEGORY_RESEARCH;
+
 #[contracttype]
 // Debug and PartialEq let tests assert_eq! on a try_* callâ€™s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
@@ -133,6 +182,12 @@ pub struct Ngo {
     /// reaches it the entry is treated as unverified by `is_verified` and
     /// `get_ngo`, until an admin renews it. See issue #348.
     pub verified_until: Option<u64>,
+    /// Bitmask of category tags chosen by the owner, expressed as the bitwise
+    /// OR of `CATEGORY_*` constants. `0` means uncategorised. Set via
+    /// `set_categories`; locked once the NGO is verified (the owner must
+    /// request revocation to change it after approval). Readable via
+    /// `categories()` or `get_ngo()`.
+    pub categories: u32,
 }
 
 /// A single page of the NGO owners index, returned by `list_ngos_page`.
@@ -214,6 +269,10 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
+    /// `set_categories` was given a value with one or more reserved bits set.
+    /// Only bits 0–7 (`VALID_CATEGORY_MASK`) are defined; any higher bit must
+    /// be zero.
+    InvalidCategories = 16,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -816,6 +875,7 @@ impl NgoRegistry {
             verified: false,
             metadata_uri: None,
             verified_until: None,
+            categories: 0,
         };
         env.storage().persistent().set(&key, &ngo);
 
@@ -1393,6 +1453,91 @@ impl NgoRegistry {
             .persistent()
             .get::<_, Ngo>(&DataKey::Ngo(owner))
             .and_then(|ngo| ngo.metadata_uri)
+    }
+
+    /// Sets the category bitmask for the caller's own NGO entry. The bitmask
+    /// is the bitwise OR of any `CATEGORY_*` constants that describe what the
+    /// NGO does. Pass `0` to clear all categories.
+    ///
+    /// Categories are **owner-settable before verification** and are locked
+    /// once the entry is approved (`Error::AlreadyVerified`). To change them
+    /// after approval the owner must ask an admin to revoke verification first.
+    ///
+    /// Any bit outside `VALID_CATEGORY_MASK` (bits 8–31) is reserved and
+    /// causes `Error::InvalidCategories`. Only emits `CategoriesSetEvent` when
+    /// the value actually changes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, CATEGORY_HEALTH, CATEGORY_EDUCATION};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// client.set_categories(&owner, &(CATEGORY_HEALTH | CATEGORY_EDUCATION));
+    /// assert_eq!(client.categories(&owner), CATEGORY_HEALTH | CATEGORY_EDUCATION);
+    /// ```
+    pub fn set_categories(env: Env, owner: Address, categories: u32) -> Result<(), Error> {
+        owner.require_auth();
+
+        if categories & !VALID_CATEGORY_MASK != 0 {
+            return Err(Error::InvalidCategories);
+        }
+
+        let key = DataKey::Ngo(owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        if ngo.verified {
+            return Err(Error::AlreadyVerified);
+        }
+
+        if ngo.categories != categories {
+            ngo.categories = categories;
+            env.storage().persistent().set(&key, &ngo);
+            extend_instance_ttl(&env);
+            extend_ngo_ttl(&env, &owner);
+
+            CategoriesSetEvent { owner, categories }.publish(&env);
+        }
+
+        Ok(())
+    }
+
+    /// Reads back the category bitmask for an NGO. Returns `0` for an
+    /// unregistered address or one that has not called `set_categories`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, CATEGORY_ENVIRONMENT};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.categories(&owner), 0);
+    ///
+    /// client.set_categories(&owner, &CATEGORY_ENVIRONMENT);
+    /// assert_eq!(client.categories(&owner), CATEGORY_ENVIRONMENT);
+    /// ```
+    pub fn categories(env: Env, owner: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, Ngo>(&DataKey::Ngo(owner))
+            .map(|ngo| ngo.categories)
+            .unwrap_or(0)
     }
 
     /// Reads back an NGO's registry entry, registered or not.
