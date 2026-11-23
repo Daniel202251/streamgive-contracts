@@ -1349,6 +1349,291 @@ fn get_config_reflects_admin_settings() {
 }
 
 #[test]
+fn get_config_snapshot_every_setter() {
+    let s = setup();
+
+    // Snapshot 1: Default config after init
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: None,
+            fee_bps: 0,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 2: After set_treasury
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 0,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 3: After set_fee_bps
+    s.client.set_fee_bps(&500);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 4: After set_min_deposit
+    s.client.set_min_deposit(&100);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 5: After set_max_streams_per_donor
+    s.client.set_max_streams_per_donor(&50);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 6: After set_max_rate
+    s.client.set_max_rate(&1_000);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 7: After set_min_duration
+    s.client.set_min_duration(&60);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 8: After set_registry
+    let registry = Address::generate(&s.env);
+    s.client.set_registry(&registry);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 9: After set_cancel_grace_ledgers
+    s.client.set_cancel_grace_ledgers(&10);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 10: After pause
+    s.client.pause();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: true,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 11: After unpause
+    s.client.unpause();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 12: After propose_admin
+    let candidate = Address::generate(&s.env);
+    s.client.propose_admin(&candidate);
+    assert_eq!(
+        s.client.get_config().pending_admin,
+        Some(candidate.clone())
+    );
+
+    // Snapshot 13: After cancel_admin_proposal
+    s.client.cancel_admin_proposal();
+    assert_eq!(s.client.get_config().pending_admin, None);
+
+    // Propose again for the final snapshot
+    s.client.propose_admin(&candidate);
+
+    // Snapshot 14: After renounce_admin (pending_admin cleared, renounced = true)
+    s.client.renounce_admin();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: None,
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: None,
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: true,
+        }
+    );
+}
+
+#[test]
 fn set_fee_bps_rejects_over_cap() {
     let s = setup();
     let result = s.client.try_set_fee_bps(&1_001);
