@@ -3394,6 +3394,71 @@ fn create_stream_with_start_rejects_cliff_beyond_the_limit() {
     assert_eq!(s.token.balance(&s.donor), balance_before);
 }
 
+/// A delayed start and a donor pause are independent clocks: pausing or
+/// resuming before the cliff must not pull any of the stream's time forward,
+/// and pausing or resuming after it must settle exactly the accrual earned up
+/// to that checkpoint. See issue #457.
+#[test]
+fn future_start_stream_can_be_paused_and_resumed_before_and_after_start() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_000);
+
+    let start = 1_500;
+    let stream_id =
+        s.client
+            .create_stream_with_start(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &start);
+
+    // Pausing before the cliff settles nothing: the full deposit is still
+    // committed and the stream is frozen at zero accrual.
+    s.env.ledger().with_mut(|l| l.timestamp = 1_200);
+    assert_eq!(s.client.pause_stream(&stream_id), 0);
+    let paused = s.client.get_stream(&stream_id);
+    assert_eq!(paused.status, StreamStatus::Paused);
+    assert_eq!(paused.balance, 1_000);
+    assert_eq!(paused.withdrawn, 0);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    assert_eq!(s.token.balance(&s.ngo), 0);
+
+    // Time spent paused before the cliff is inert, and resuming before the
+    // cliff does not start accrual early.
+    s.env.ledger().with_mut(|l| l.timestamp = 1_300);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_400);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // Once the cliff passes, accrual is dated from `start` rather than from
+    // either checkpoint.
+    s.env.ledger().with_mut(|l| l.timestamp = 1_520);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+
+    // Pausing after the cliff settles those 20 seconds and freezes the rest.
+    assert_eq!(s.client.pause_stream(&stream_id), 200);
+    let paused = s.client.get_stream(&stream_id);
+    assert_eq!(paused.status, StreamStatus::Paused);
+    assert_eq!(paused.balance, 800);
+    assert_eq!(paused.withdrawn, 200);
+    assert_eq!(s.token.balance(&s.ngo), 200);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_600);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // Resuming after the cliff restarts the clock from the resume time, so
+    // only the seconds after it are payable.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_650);
+    assert_eq!(s.client.pending_accrual(&stream_id), 500);
+    assert_eq!(s.client.withdraw(&stream_id), 500);
+    assert_eq!(s.token.balance(&s.ngo), 700);
+
+    let final_stream = s.client.get_stream(&stream_id);
+    assert_eq!(final_stream.status, StreamStatus::Active);
+    assert_eq!(final_stream.balance, 300);
+    assert_eq!(final_stream.withdrawn, 700);
+}
+
 // =============================================================================
 // Issue #341: optional bounded memo on a stream
 // =============================================================================

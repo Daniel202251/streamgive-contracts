@@ -1615,6 +1615,7 @@ impl DonationVault {
     }
 
     /// Read-only lookup of how much a stream has accrued to the NGO so far.
+    /// A paused stream reports `0`: no time passes for it until it resumes.
     ///
     /// # Examples
     ///
@@ -1647,6 +1648,11 @@ impl DonationVault {
             .get(&DataKey::Stream(stream_id))
             .ok_or(Error::StreamNotFound)?;
 
+        // Mirror `settle`'s accrual rules so the view matches what a
+        // checkpoint would actually pay: a paused stream accrues nothing.
+        if stream.status == StreamStatus::Paused {
+            return Ok(0);
+        }
         let now = env.ledger().timestamp();
         let elapsed = now.saturating_sub(accrual_base(&stream));
         Ok(math::accrued(stream.rate, elapsed, stream.balance))
