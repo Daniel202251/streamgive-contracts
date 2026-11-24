@@ -6928,3 +6928,112 @@ fn streams_by_donor_handles_default_cap() {
     let streams = s.client.streams_by_donor(&s.donor);
     assert_eq!(streams.len(), 100);
 }
+
+// =============================================================================
+// Property tests for the committed-balance invariant (Issue 454)
+// =============================================================================
+
+#[cfg(test)]
+mod proptest_committed_balance {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseResult;
+
+    #[derive(Debug, Clone)]
+    enum Action {
+        Create { deposit: i128, rate: i128 },
+        TopUp { slot: usize, amount: i128 },
+        Withdraw { slot: usize },
+        Cancel { slot: usize },
+        Transfer { slot: usize },
+    }
+
+    #[derive(Debug, Clone)]
+    struct Step {
+        advance: u64,
+        action: Action,
+    }
+
+    fn step_strategy() -> impl Strategy<Value = Step> {
+        let action = prop_oneof![
+            3 => (100i128..=5_000i128, 1i128..=20i128)
+                .prop_map(|(deposit, rate)| Action::Create { deposit, rate }),
+            2 => (0usize..12, 100i128..=2_000i128)
+                .prop_map(|(slot, amount)| Action::TopUp { slot, amount }),
+            3 => (0usize..12).prop_map(|slot| Action::Withdraw { slot }),
+            1 => (0usize..12).prop_map(|slot| Action::Cancel { slot }),
+            1 => (0usize..12).prop_map(|slot| Action::Transfer { slot }),
+        ];
+        (0u64..=30u64, action).prop_map(|(advance, action)| Step { advance, action })
+    }
+
+    /// The vault's committed balance for a token must equal the sum of the
+    /// balances of every stream funded with that token. With no surplus and no
+    /// treasury configured, the token balance the vault actually holds matches
+    /// the same number.
+    fn assert_invariant(s: &Setup<'_>, ids: &Vec<u64>) -> TestCaseResult {
+        let expected: i128 = ids.iter().map(|id| s.client.get_stream(&id).balance).sum();
+        prop_assert_eq!(s.client.committed_balance(&s.token.address), expected);
+        prop_assert_eq!(s.token.balance(&s.client.address), expected);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// A random sequence of create, top-up, withdraw, cancel and transfer
+        /// calls must keep `committed_balance` in step with stream balances
+        /// after every single call, including calls that are rejected.
+        #[test]
+        fn committed_balance_equals_sum_of_stream_balances(
+            steps in prop::collection::vec(step_strategy(), 1..20)
+        ) {
+            let s = setup();
+            s.token_admin.mint(&s.donor, &1_000_000);
+            let other_ngo = Address::generate(&s.env);
+            let mut ids = Vec::new(&s.env);
+
+            for step in steps {
+                s.env.ledger().with_mut(|l| l.timestamp += step.advance);
+
+                match step.action {
+                    Action::Create { deposit, rate } => {
+                        // `try_*` keeps the sequence going when a call is
+                        // rejected; a rejected call must not move any funds.
+                        if let Ok(Ok(id)) = s.client.try_create_stream(
+                            &s.donor,
+                            &s.ngo,
+                            &s.token.address,
+                            &deposit,
+                            &rate,
+                        ) {
+                            ids.push_back(id);
+                        }
+                    }
+                    Action::TopUp { slot, amount } => {
+                        if let Some(id) = ids.get((slot as u32) % ids.len().max(1)) {
+                            let _ = s.client.try_top_up(&id, &amount);
+                        }
+                    }
+                    Action::Withdraw { slot } => {
+                        if let Some(id) = ids.get((slot as u32) % ids.len().max(1)) {
+                            let _ = s.client.try_withdraw(&id);
+                        }
+                    }
+                    Action::Cancel { slot } => {
+                        if let Some(id) = ids.get((slot as u32) % ids.len().max(1)) {
+                            let _ = s.client.try_cancel_stream(&id);
+                        }
+                    }
+                    Action::Transfer { slot } => {
+                        if let Some(id) = ids.get((slot as u32) % ids.len().max(1)) {
+                            let _ = s.client.try_transfer_stream(&id, &other_ngo);
+                        }
+                    }
+                }
+
+                assert_invariant(&s, &ids)?;
+            }
+        }
+    }
+}
