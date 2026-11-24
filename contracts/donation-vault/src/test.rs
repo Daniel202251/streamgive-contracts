@@ -47,7 +47,8 @@ fn assert_last_event<T: IntoVal<Env, Val>, D: IntoVal<Env, Val>>(env: &Env, topi
 /// last one (issue #344).
 fn count_events_with_topic(env: &Env, topic0: Symbol) -> u32 {
     let all = env.events().all();
-    let expected = ScVal::try_from_val(env, &topic0.into_val(env)).unwrap();
+    let expected_val: Val = topic0.into_val(env);
+    let expected = ScVal::try_from_val(env, &expected_val).unwrap();
     all.events()
         .iter()
         .filter(|event| {
@@ -657,6 +658,165 @@ fn depletion_time_on_unknown_stream_fails() {
 }
 
 // =============================================================================
+// Issue #438: preview_stream view
+// =============================================================================
+
+#[test]
+fn preview_stream_reports_duration_and_token_fee_without_mutating_state() {
+    let s = setup();
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    s.client.set_fee_bps(&500); // 5% global
+    s.client.set_token_fee_bps(&s.token.address, &100); // 1% for this token
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+
+    assert_eq!(preview.duration, Some(100));
+    assert_eq!(preview.fee_bps, 100);
+    assert_eq!(preview.error, None);
+
+    // A token with no override falls back to the global fee.
+    let other_token = Address::generate(&s.env);
+    assert_eq!(
+        s.client.preview_stream(&other_token, &1_000, &10).fee_bps,
+        500
+    );
+
+    // The view is read-only: no auth, no stream, no funds moved.
+    assert!(s.env.auths().is_empty());
+    assert_eq!(s.client.stream_count(), 0);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+
+    // And its duration agrees with the stream once it is actually created.
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let created_at = s.client.get_stream(&stream_id).created_at;
+    assert_eq!(s.client.depletion_time(&stream_id), Some(created_at + 100));
+}
+
+#[test]
+fn preview_stream_matches_create_stream_for_token_and_amount_errors() {
+    let s = setup();
+
+    let cases = [
+        (s.token.address.clone(), 0i128, 10i128, Error::InvalidAmount),
+        (
+            s.token.address.clone(),
+            1_000i128,
+            0i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.token.address.clone(),
+            -1i128,
+            10i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.token.address.clone(),
+            1_000i128,
+            -1i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.client.address.clone(),
+            1_000i128,
+            10i128,
+            Error::InvalidToken,
+        ),
+    ];
+
+    for (token, deposit, rate, expected) in cases {
+        let preview = s.client.preview_stream(&token, &deposit, &rate);
+        assert_eq!(
+            preview.error,
+            Some(expected as u32),
+            "preview for deposit={deposit} rate={rate}"
+        );
+
+        let created = s
+            .client
+            .try_create_stream(&s.donor, &s.ngo, &token, &deposit, &rate);
+        assert_eq!(
+            created,
+            Err(Ok(expected)),
+            "create_stream for deposit={deposit} rate={rate}"
+        );
+    }
+
+    // A non-positive amount has no meaningful depletion time.
+    assert_eq!(
+        s.client.preview_stream(&s.token.address, &0, &10).duration,
+        None
+    );
+    assert_eq!(
+        s.client
+            .preview_stream(&s.token.address, &1_000, &0)
+            .duration,
+        None
+    );
+}
+
+#[test]
+fn preview_stream_matches_create_stream_for_configured_limits() {
+    let s = setup();
+
+    s.client.set_min_deposit(&500);
+    let preview = s.client.preview_stream(&s.token.address, &100, &10);
+    assert_eq!(preview.error, Some(Error::DepositTooLow as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &100, &10),
+        Err(Ok(Error::DepositTooLow))
+    );
+
+    s.client.set_max_rate(&5);
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::RateTooHigh as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::RateTooHigh))
+    );
+
+    s.client.clear_max_rate();
+    s.client.set_min_duration(&101);
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::StreamTooShort as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::StreamTooShort))
+    );
+}
+
+#[test]
+fn preview_stream_matches_create_stream_when_paused() {
+    let s = setup();
+    s.client.pause();
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::ContractPaused as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::ContractPaused))
+    );
+}
+
+#[test]
+fn preview_stream_rounds_a_partial_final_second_up() {
+    let s = setup();
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &300);
+
+    assert_eq!(preview.duration, Some(4));
+    assert_eq!(preview.error, None);
+}
+
+// =============================================================================
 // Issue #345: pending_refund view for donors
 // =============================================================================
 
@@ -740,14 +900,9 @@ fn pending_refund_before_a_streams_cliff_is_the_full_balance() {
     s.token_admin.mint(&s.donor, &1_000);
 
     let start = s.env.ledger().timestamp() + 100;
-    let stream_id = s.client.create_stream_with_start(
-        &s.donor,
-        &s.ngo,
-        &s.token.address,
-        &1_000,
-        &10,
-        &start,
-    );
+    let stream_id =
+        s.client
+            .create_stream_with_start(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &start);
 
     // Nothing accrues before `start`, so the whole deposit is refundable.
     assert_eq!(s.client.pending_refund(&stream_id), 1_000);
@@ -921,7 +1076,8 @@ fn pause_blocks_fund_movement_but_allows_cancel_and_queries() {
 
     // Fund-moving operations are blocked
     assert_eq!(
-        s.client.try_create_stream(&s.donor, &s.ngo, &s.token.address, &500, &10),
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &500, &10),
         Err(Ok(Error::ContractPaused)),
         "create_stream should be blocked"
     );
@@ -941,7 +1097,8 @@ fn pause_blocks_fund_movement_but_allows_cancel_and_queries() {
         "modify_rate should be blocked"
     );
     assert_eq!(
-        s.client.try_transfer_stream(&stream_id, &Address::generate(&s.env)),
+        s.client
+            .try_transfer_stream(&stream_id, &Address::generate(&s.env)),
         Err(Ok(Error::ContractPaused)),
         "transfer_stream should be blocked"
     );
@@ -2696,10 +2853,7 @@ fn create_and_top_up_near_i128_max() {
         s.token.balance(&s.donor),
         2000 - 100 // Still has the amount that failed to top up
     );
-    assert_eq!(
-        s.token.balance(&s.client.address),
-        max_deposit - 500 + 100
-    );
+    assert_eq!(s.token.balance(&s.client.address), max_deposit - 500 + 100);
 
     // Cancel should work and return the remaining balance
     let refund = s.client.cancel_stream(&stream_id);
@@ -3410,14 +3564,9 @@ fn create_stream_with_memo_stores_and_emits_the_memo() {
     s.token_admin.mint(&s.donor, &1_000);
 
     let memo = Bytes::from_array(&s.env, b"campaign-42");
-    let stream_id = s.client.create_stream_with_memo(
-        &s.donor,
-        &s.ngo,
-        &s.token.address,
-        &1_000,
-        &10,
-        &memo,
-    );
+    let stream_id =
+        s.client
+            .create_stream_with_memo(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &memo);
 
     // Snapshot the created event before any other call replaces it.
     let created = last_event(&s.env);
@@ -5449,7 +5598,7 @@ fn create_stream_rejects_vault_as_ngo() {
 
     let vault = s.client.address.clone();
     let donor_balance_before = s.token.balance(&s.donor);
-    
+
     let result = s
         .client
         .try_create_stream(&s.donor, &vault, &s.token.address, &1_000, &10);
@@ -5459,7 +5608,7 @@ fn create_stream_rejects_vault_as_ngo() {
     assert_eq!(s.client.stream_count(), 0);
     assert_eq!(s.client.total_donated(), 0);
     assert_eq!(s.client.streams_by_donor(&s.donor).len(), 0);
-    
+
     // No funds moved: donor keeps all tokens, vault has none
     assert_eq!(s.token.balance(&s.donor), donor_balance_before);
     assert_eq!(s.token.balance(&vault), 0);
@@ -5472,7 +5621,7 @@ fn create_stream_rejects_vault_as_token() {
 
     let vault = s.client.address.clone();
     let donor_balance_before = s.token.balance(&s.donor);
-    
+
     let result = s
         .client
         .try_create_stream(&s.donor, &s.ngo, &vault, &1_000, &10);
@@ -5482,7 +5631,7 @@ fn create_stream_rejects_vault_as_token() {
     assert_eq!(s.client.stream_count(), 0);
     assert_eq!(s.client.total_donated(), 0);
     assert_eq!(s.client.streams_by_donor(&s.donor).len(), 0);
-    
+
     // No funds moved: donor keeps all tokens (the real token balance)
     assert_eq!(s.token.balance(&s.donor), donor_balance_before);
 }
@@ -5493,19 +5642,25 @@ fn create_stream_checks_vault_address_before_other_validations() {
     s.token_admin.mint(&s.donor, &1_000);
 
     let vault = s.client.address.clone();
-    
+
     // Even with invalid amounts, vault address check comes first
     let result = s
         .client
         .try_create_stream(&s.donor, &vault, &s.token.address, &0, &10);
-    assert_eq!(result, Err(Ok(Error::InvalidNgo)),
-        "InvalidNgo should be returned before InvalidAmount");
-    
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidNgo)),
+        "InvalidNgo should be returned before InvalidAmount"
+    );
+
     let result = s
         .client
         .try_create_stream(&s.donor, &s.ngo, &vault, &1_000, &0);
-    assert_eq!(result, Err(Ok(Error::InvalidToken)),
-        "InvalidToken should be returned before InvalidAmount");
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidToken)),
+        "InvalidToken should be returned before InvalidAmount"
+    );
 }
 
 // =============================================================================
@@ -6768,27 +6923,6 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    s.env.ledger().with_mut(|l| l.timestamp += 100);
-
-    s.client.transfer_stream(&stream_id, &new_ngo);
-
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Drained
-    );
-    assert_nth_last_event(
-        &s.env,
-        1,
-        (symbol_short!("drained"), stream_id),
-        (1_000i128,),
-    );
-    assert_last_event(
-        &s.env,
-        (symbol_short!("transfer"), stream_id),
-        (s.ngo.clone(), new_ngo.clone(), 1_000i128),
-    );
-}
 
 // =============================================================================
 // Property tests for fee calculation invariants (Issue 1)
@@ -6799,8 +6933,8 @@ mod proptest_fee_invariants {
     use super::*;
     use proptest::prelude::*;
 
-    /// Property test: fee + net always equals accrued for any rate, elapsed time,
-    /// and fee settings, and no value is negative.
+    // Property test: fee + net always equals accrued for any rate, elapsed time,
+    // and fee settings, and no value is negative.
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(1000))]
 
@@ -6813,7 +6947,7 @@ mod proptest_fee_invariants {
         ) {
             let s = setup();
             s.token_admin.mint(&s.donor, &balance);
-            
+
             let treasury = Address::generate(&s.env);
             s.client.set_treasury(&treasury);
             s.client.set_fee_bps(&fee_bps);
@@ -6830,12 +6964,12 @@ mod proptest_fee_invariants {
 
             // Core invariant: fee + net == accrued
             prop_assert_eq!(fee_balance + net, accrued);
-            
+
             // No value should be negative
             prop_assert!(fee_balance >= 0);
             prop_assert!(net >= 0);
             prop_assert!(accrued >= 0);
-            
+
             // Net should never exceed accrued
             prop_assert!(net <= accrued);
         }
@@ -6869,9 +7003,13 @@ fn accrual_with_max_elapsed_and_large_rate_never_overflows() {
     let balance: i128 = 10_000_000_000;
     s.token_admin.mint(&s.donor, &balance);
 
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &i128::MAX / 2);
+    let stream_id = s.client.create_stream(
+        &s.donor,
+        &s.ngo,
+        &s.token.address,
+        &balance,
+        &(i128::MAX / 2),
+    );
 
     // Advance time to u64::MAX
     s.env.ledger().with_mut(|l| l.timestamp += u64::MAX);
@@ -6889,7 +7027,7 @@ fn accrual_near_u64_max_with_various_rates() {
 
     for rate in [1i128, 100, 10_000, 1_000_000, i128::MAX / 2] {
         s.token_admin.mint(&s.donor, &balance);
-        
+
         let stream_id = s
             .client
             .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
@@ -6900,7 +7038,7 @@ fn accrual_near_u64_max_with_various_rates() {
         let accrued = s.client.pending_accrual(&stream_id);
         assert!(accrued >= 0);
         assert!(accrued <= balance);
-        
+
         s.client.cancel_stream(&stream_id);
     }
 }
@@ -6924,9 +7062,9 @@ fn default_stream_cap_allows_exactly_100_streams() {
 
     // The 101st stream should fail with StreamLimitExceeded
     s.token_admin.mint(&s.donor, &balance_per_stream);
-    let result = s
-        .client
-        .try_create_stream(&s.donor, &s.ngo, &s.token.address, &balance_per_stream, &10);
+    let result =
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &balance_per_stream, &10);
     assert_eq!(result, Err(Ok(Error::StreamLimitExceeded)));
 }
 
