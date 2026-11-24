@@ -230,15 +230,15 @@ pub struct UpgradeDelaySetEvent {
     pub delay: u64,
 }
 
-/// Emitted by `sweep_surplus` when the admin moves tokens that were sent to
-/// the vault by mistake (above the committed balance for that token) to the
-/// treasury. See issue #346.
+/// Emitted by `sweep_surplus` / `sweep_surplus_to` when the admin moves
+/// tokens that were sent to the vault by mistake (above the committed balance
+/// for that token) to an explicit destination. See issues #346 and #439.
 #[contractevent(topics = ["sweep"], data_format = "vec")]
 pub struct SurplusSweptEvent {
     #[topic]
     pub token: Address,
     pub amount: i128,
-    pub treasury: Address,
+    pub destination: Address,
 }
 
 /// A contract upgrade recorded by `propose_upgrade`, awaiting the timelock
@@ -373,6 +373,20 @@ pub struct WithdrawAllPage {
     /// The `start` to pass on the next call: one past the end of this page,
     /// clamped to the NGO's stream count. Iteration is complete once it
     /// reaches that count (see `streams_by_ngo`).
+    pub next: u32,
+}
+
+/// One page of an NGO's still-live streams, returned by
+/// `active_streams_by_ngo` (issue #440).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveStreamsPage {
+    /// Live stream ids in creation order: `Active` and `Paused` streams.
+    /// `Cancelled` and `Drained` streams are omitted.
+    pub ids: Vec<u64>,
+    /// The `start` to pass on the next call. It points past the last stream
+    /// examined (or past the last id collected when `limit` filled the page
+    /// first). Iteration is complete once it stops advancing.
     pub next: u32,
 }
 
@@ -560,6 +574,10 @@ pub enum Error {
     /// `modify_rate` before any funds move. Distinct from `InvalidAmount`,
     /// which only covers a zero or negative amount. See issue #340.
     StreamTooShort = 39,
+    /// `sweep_surplus` / `sweep_surplus_to` was asked to send the surplus to
+    /// the vault itself, which would be a no-op reported as a sweep. See
+    /// issue #439.
+    InvalidSweepDestination = 40,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -841,6 +859,57 @@ fn payout_destination(env: &Env, ngo: &Address) -> Address {
         .persistent()
         .get(&DataKey::NgoPayoutAddress(ngo.clone()))
         .unwrap_or_else(|| ngo.clone())
+}
+
+/// Shared implementation of `sweep_surplus` and `sweep_surplus_to`. `None`
+/// resolves the destination from the configured treasury (`NoTreasury` when
+/// unset); `Some` sweeps to the caller-supplied address instead (issue #439).
+fn sweep_surplus_inner(
+    env: Env,
+    token: Address,
+    amount: i128,
+    destination: Option<Address>,
+) -> Result<(), Error> {
+    require_admin(&env)?;
+    require_not_paused(&env)?;
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let destination = match destination {
+        Some(destination) => destination,
+        None => env
+            .storage()
+            .instance()
+            .get(&DataKey::Treasury)
+            .ok_or(Error::NoTreasury)?,
+    };
+    if destination == env.current_contract_address() {
+        return Err(Error::InvalidSweepDestination);
+    }
+
+    let token_client = token::Client::new(&env, &token);
+    let held = token_client.balance(&env.current_contract_address());
+    // Anything held beyond the streams' committed balance is sweatable. A
+    // broken invariant (held below committed) leaves no surplus rather than
+    // underflowing, so a sweep is simply rejected.
+    let surplus = held.saturating_sub(get_committed(&env, &token));
+    if amount > surplus {
+        return Err(Error::SweepExceedsSurplus);
+    }
+
+    token_client.transfer(&env.current_contract_address(), &destination, &amount);
+    extend_instance_ttl(&env);
+
+    SurplusSweptEvent {
+        token,
+        amount,
+        destination,
+    }
+    .publish(&env);
+
+    Ok(())
 }
 
 /// Returns the admin-configured maximum per-second rate, if any. `None`
@@ -1583,6 +1652,78 @@ impl DonationVault {
             }
         }
         ids
+    }
+
+    /// Lists the ids of an NGO's streams that are still live — `Active` or
+    /// `Paused` — skipping `Cancelled` and `Drained` ones (issue #440).
+    ///
+    /// Unlike `streams_by_ngo`, this pages over a filtered view: finished
+    /// streams never occupy a slot, so a caller enumerating an NGO's open
+    /// positions does not have to fetch and discard them. The contract
+    /// examines at most `MAX_STREAMS_BY_NGO` index positions per call and
+    /// returns at most `limit` ids (also clamped to `MAX_STREAMS_BY_NGO`);
+    /// `next` is the position to pass as `start` on the next call.
+    ///
+    /// Iteration is complete when `next` does not advance past the `start`
+    /// passed in — either because every position was examined or because
+    /// `limit` was zero. An empty `ids` with an advancing `next` only means
+    /// the scanned window held no live streams; keep paging. This is a
+    /// read-only view.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, token, Address, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, ());
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # let ngo = Address::generate(&env);
+    /// # client.init(&admin);
+    /// let page = client.active_streams_by_ngo(&ngo, &0, &20);
+    /// assert!(page.ids.len() <= 20);
+    /// // Page again from `page.next` until it stops advancing.
+    /// ```
+    pub fn active_streams_by_ngo(
+        env: Env,
+        ngo: Address,
+        start: u32,
+        limit: u32,
+    ) -> ActiveStreamsPage {
+        let ngo_streams: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NgoStreams(ngo))
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = ngo_streams.len();
+        if start >= total || limit == 0 {
+            return ActiveStreamsPage {
+                ids: Vec::new(&env),
+                next: start.min(total),
+            };
+        }
+
+        let target = limit.min(MAX_STREAMS_BY_NGO);
+        let window_end = start.saturating_add(MAX_STREAMS_BY_NGO).min(total);
+        let mut ids = Vec::new(&env);
+        let mut index = start;
+        while index < window_end && ids.len() < target {
+            let id = ngo_streams.get(index).unwrap();
+            index += 1;
+            if let Some(stream) = env
+                .storage()
+                .persistent()
+                .get::<_, Stream>(&DataKey::Stream(id))
+            {
+                if matches!(stream.status, StreamStatus::Active | StreamStatus::Paused) {
+                    ids.push_back(id);
+                }
+            }
+        }
+
+        ActiveStreamsPage { ids, next: index }
     }
 
     /// Reads back the number of streams ever created — the exclusive upper
@@ -3949,45 +4090,58 @@ impl DonationVault {
     /// The vault's live balance of `token` is compared against the committed
     /// balance it holds on behalf of streams (`committed_balance`); `amount`
     /// may only cover the surplus above that, so a sweep can never dip into
-    /// funds belonging to streams. Admin-gated; emits a `sweep` event. Fails
-    /// with `NoTreasury` when no treasury is configured, with `InvalidAmount`
-    /// when `amount` is not positive, and with `SweepExceedsSurplus` when
-    /// `amount` exceeds the surplus.
+    /// funds belonging to streams. Admin-gated; emits a `sweep` event naming
+    /// the destination. Fails with `NoTreasury` when no treasury is
+    /// configured, with `InvalidAmount` when `amount` is not positive, with
+    /// `InvalidSweepDestination` when the treasury is the vault itself, and
+    /// with `SweepExceedsSurplus` when `amount` exceeds the surplus.
+    ///
+    /// Use `sweep_surplus_to` to send a sweep to an address other than the
+    /// configured treasury (issue #439).
     pub fn sweep_surplus(env: Env, token: Address, amount: i128) -> Result<(), Error> {
-        require_admin(&env)?;
-        require_not_paused(&env)?;
+        sweep_surplus_inner(env, token, amount, None)
+    }
 
-        if amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-
-        let treasury: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Treasury)
-            .ok_or(Error::NoTreasury)?;
-
-        let token_client = token::Client::new(&env, &token);
-        let held = token_client.balance(&env.current_contract_address());
-        // Anything held beyond the streams' committed balance is sweatable. A
-        // broken invariant (held below committed) leaves no surplus rather than
-        // underflowing, so a sweep is simply rejected.
-        let surplus = held.saturating_sub(get_committed(&env, &token));
-        if amount > surplus {
-            return Err(Error::SweepExceedsSurplus);
-        }
-
-        token_client.transfer(&env.current_contract_address(), &treasury, &amount);
-        extend_instance_ttl(&env);
-
-        SurplusSweptEvent {
-            token,
-            amount,
-            treasury,
-        }
-        .publish(&env);
-
-        Ok(())
+    /// Sweeps tokens that were sent to the vault by mistake to an explicit
+    /// `destination`, without requiring a treasury to be configured.
+    ///
+    /// Applies exactly the same accounting as `sweep_surplus`: only the
+    /// balance above the streams' committed total can move, so a sweep can
+    /// never touch donor funds. The `sweep` event names `destination`, so indexers can follow misplaced tokens to
+    /// wherever the admin sent them. Admin-gated; fails with `InvalidAmount`
+    /// when `amount` is not positive, with `InvalidSweepDestination` when
+    /// `destination` is the vault itself, and with `SweepExceedsSurplus` when
+    /// `amount` exceeds the surplus.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, token, Address, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, ());
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # let donor = Address::generate(&env);
+    /// # let token_admin = Address::generate(&env);
+    /// # let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    /// # let token_client = token::StellarAssetClient::new(&env, &sac.address());
+    /// let recovered = Address::generate(&env);
+    /// token_client.mint(&donor, &500);
+    /// token_client.transfer(&donor, &client.address, &500);
+    ///
+    /// // 500 held against nothing committed: recover it to an explicit address.
+    /// client.sweep_surplus_to(&sac.address(), &500, &recovered);
+    /// assert_eq!(token_client.balance(&recovered), 500);
+    /// ```
+    pub fn sweep_surplus_to(
+        env: Env,
+        token: Address,
+        amount: i128,
+        destination: Address,
+    ) -> Result<(), Error> {
+        sweep_surplus_inner(env, token, amount, Some(destination))
     }
 
     /// Replaces the contract's Wasm bytecode in place. Admin-only.

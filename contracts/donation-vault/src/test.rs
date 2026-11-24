@@ -970,6 +970,12 @@ fn pause_blocks_fund_movement_but_allows_cancel_and_queries() {
         Err(Ok(Error::ContractPaused)),
         "sweep_surplus should be blocked"
     );
+    assert_eq!(
+        s.client
+            .try_sweep_surplus_to(&s.token.address, &100, &Address::generate(&s.env)),
+        Err(Ok(Error::ContractPaused)),
+        "sweep_surplus_to should be blocked"
+    );
 
     // cancel_stream always works (emergency exit for donors)
     let refund = s.client.cancel_stream(&stream_id);
@@ -4204,6 +4210,128 @@ fn streams_by_ngo_tracks_create_and_transfer_with_pagination() {
 }
 
 #[test]
+fn active_streams_by_ngo_skips_finished_streams_across_pages() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &6_000);
+
+    let s1 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s2 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s3 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s4 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s5 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s6 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // s4 is paused while still funded, so it stays live.
+    s.client.pause_stream(&s4);
+    // 100 s at 10/s drains s2 exactly; s3 is cancelled.
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&s2);
+    s.client.cancel_stream(&s3);
+
+    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Drained);
+    assert_eq!(s.client.get_stream(&s3).status, StreamStatus::Cancelled);
+    assert_eq!(s.client.get_stream(&s4).status, StreamStatus::Paused);
+
+    // The first page fills with the two live streams in this window, skipping
+    // the drained and cancelled slots between them.
+    let first_page = s.client.active_streams_by_ngo(&s.ngo, &0, &2);
+    assert_eq!(first_page.ids.len(), 2);
+    assert_eq!(first_page.ids.get(0), Some(s1));
+    assert_eq!(first_page.ids.get(1), Some(s4));
+    assert_eq!(first_page.next, 4);
+
+    let second_page = s.client.active_streams_by_ngo(&s.ngo, &first_page.next, &2);
+    assert_eq!(second_page.ids.len(), 2);
+    assert_eq!(second_page.ids.get(0), Some(s5));
+    assert_eq!(second_page.ids.get(1), Some(s6));
+    assert_eq!(second_page.next, 6);
+
+    let done = s
+        .client
+        .active_streams_by_ngo(&s.ngo, &second_page.next, &2);
+    assert!(done.ids.is_empty());
+    assert_eq!(done.next, 6);
+
+    // The unfiltered view still reports every slot, including finished ones.
+    assert_eq!(s.client.streams_by_ngo(&s.ngo, &0, &10).len(), 6);
+}
+
+#[test]
+fn active_streams_by_ngo_advances_past_a_window_with_no_live_streams() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &3_000);
+
+    let a = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let b = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let c = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&a);
+    s.client.cancel_stream(&b);
+    s.client.withdraw(&c);
+
+    // No live streams, but the cursor still advances to the end of the
+    // examined window so the caller can tell "nothing here" from "done".
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &2);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 3);
+
+    let done = s.client.active_streams_by_ngo(&s.ngo, &page.next, &2);
+    assert!(done.ids.is_empty());
+    assert_eq!(done.next, 3);
+}
+
+#[test]
+fn active_streams_by_ngo_edge_cases_return_a_usable_next() {
+    let s = setup();
+
+    // Unknown NGO: nothing to page.
+    let unknown = Address::generate(&s.env);
+    let page = s.client.active_streams_by_ngo(&unknown, &0, &10);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 0);
+
+    s.token_admin.mint(&s.donor, &1_000);
+    let id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // Starting at or past the end reports no progress.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &1, &10);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 1);
+
+    // A zero limit examines nothing rather than looping.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &0);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 0);
+
+    // An oversized limit is clamped to the scan window.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &10_000);
+    assert_eq!(page.ids.len(), 1);
+    assert_eq!(page.ids.get(0), Some(id));
+    assert_eq!(page.next, 1);
+}
+
+#[test]
 fn total_donated_overflow_rejects_create_and_top_up() {
     let s = setup();
     s.token_admin.mint(&s.donor, &2_000);
@@ -4681,6 +4809,137 @@ fn sweep_surplus_rejected_while_paused() {
     s.client.pause();
 
     let result = s.client.try_sweep_surplus(&s.token.address, &1);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn sweep_surplus_to_sends_to_explicit_destination_and_publishes_event() {
+    let s = setup();
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &1_500);
+    let _stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.token.transfer(&s.donor, &s.client.address, &500);
+
+    let swept = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &500, &destination);
+    assert!(swept.is_ok());
+
+    assert_last_event(
+        &s.env,
+        (symbol_short!("sweep"), s.token.address.clone()),
+        (500i128, destination.clone()),
+    );
+
+    // The explicit destination wins over the configured treasury, which is
+    // left untouched; the stream's committed funds stay in the vault.
+    assert_eq!(s.token.balance(&destination), 500);
+    assert_eq!(s.token.balance(&treasury), 0);
+    assert_eq!(s.token.balance(&s.client.address), 1_000);
+    assert_eq!(s.client.committed_balance(&s.token.address), 1_000);
+}
+
+#[test]
+fn sweep_surplus_to_works_without_a_treasury() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &100);
+    s.token.transfer(&s.donor, &s.client.address, &100);
+
+    // No treasury is configured, so `sweep_surplus` would fail with
+    // NoTreasury; the explicit destination needs none.
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &100, &destination);
+    assert!(result.is_ok());
+    assert_eq!(s.token.balance(&destination), 100);
+    assert_eq!(s.client.surplus(&s.token.address), 0);
+}
+
+#[test]
+fn sweep_surplus_to_respects_the_surplus_bound() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &1_400);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.token.transfer(&s.donor, &s.client.address, &400);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &401, &destination);
+    assert_eq!(result, Err(Ok(Error::SweepExceedsSurplus)));
+    assert_eq!(s.token.balance(&destination), 0);
+
+    s.client
+        .sweep_surplus_to(&s.token.address, &400, &destination);
+    assert_eq!(s.token.balance(&destination), 400);
+    assert_eq!(s.token.balance(&s.client.address), 1_000);
+
+    // The stream can still draw down its full committed deposit.
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&stream_id);
+    assert_eq!(s.token.balance(&s.ngo), 1_000);
+}
+
+#[test]
+fn sweep_surplus_to_rejects_the_vault_as_destination() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &100);
+    s.token.transfer(&s.donor, &s.client.address, &100);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &100, &s.client.address);
+    assert_eq!(result, Err(Ok(Error::InvalidSweepDestination)));
+    assert_eq!(s.token.balance(&s.client.address), 100);
+}
+
+#[test]
+fn sweep_surplus_to_rejects_non_positive_amount() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &0, &destination);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &-1, &destination);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn sweep_surplus_to_requires_admin() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.env.mock_auths(&[]);
+    assert!(s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &1, &destination)
+        .is_err());
+}
+
+#[test]
+fn sweep_surplus_to_rejected_while_paused() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+    s.client.pause();
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &1, &destination);
     assert_eq!(result, Err(Ok(Error::ContractPaused)));
 }
 
