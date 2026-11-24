@@ -1033,11 +1033,7 @@ impl NgoRegistry {
             .set(&DataKey::Approvers, &approvers);
         extend_instance_ttl(&env);
 
-        ApproverAddedEvent {
-            approver,
-            data: (),
-        }
-        .publish(&env);
+        ApproverAddedEvent { approver, data: () }.publish(&env);
 
         Ok(())
     }
@@ -1084,11 +1080,7 @@ impl NgoRegistry {
             .set(&DataKey::Approvers, &remaining);
         extend_instance_ttl(&env);
 
-        ApproverRemovedEvent {
-            approver,
-            data: (),
-        }
-        .publish(&env);
+        ApproverRemovedEvent { approver, data: () }.publish(&env);
 
         Ok(())
     }
@@ -1362,7 +1354,11 @@ impl NgoRegistry {
             extend_instance_ttl(&env);
             extend_ngo_ttl(&env, &owner);
 
-            MetadataUriSetEvent { owner, metadata_uri }.publish(&env);
+            MetadataUriSetEvent {
+                owner,
+                metadata_uri,
+            }
+            .publish(&env);
         }
 
         Ok(())
@@ -1647,11 +1643,7 @@ impl NgoRegistry {
     ///
     /// client.batch_approve(&admin, &vec![&env, a, b]);
     /// ```
-    pub fn batch_approve(
-        env: Env,
-        approver: Address,
-        owners: Vec<Address>,
-    ) -> Result<(), Error> {
+    pub fn batch_approve(env: Env, approver: Address, owners: Vec<Address>) -> Result<(), Error> {
         require_approver(&env, &approver)?;
         for ngo_owner in owners.iter() {
             approve_registered_ngo(&env, ngo_owner)?;
