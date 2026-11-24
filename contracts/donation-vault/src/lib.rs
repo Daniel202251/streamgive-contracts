@@ -849,7 +849,10 @@ fn max_rate_cap(env: &Env) -> Option<i128> {
 /// (the default) means no minimum is enforced, so the check in
 /// `create_stream` and `modify_rate` is skipped entirely. See issue #340.
 fn min_duration_seconds(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::MinDuration).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDuration)
+        .unwrap_or(0)
 }
 
 /// Returns true when a stream holding `balance` at a per-second `rate` would
@@ -2706,7 +2709,16 @@ impl DonationVault {
         deposit: i128,
         rate: i128,
     ) -> Result<u64, Error> {
-        create_stream_inner(env.clone(), donor, ngo, token, deposit, rate, None, Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream with a cliff: it stays idle until `start`, so nothing
@@ -2765,7 +2777,16 @@ impl DonationVault {
         rate: i128,
         start: u64,
     ) -> Result<u64, Error> {
-        create_stream_inner(env.clone(), donor, ngo, token, deposit, rate, Some(start), Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            Some(start),
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream that begins accruing immediately, tagged with an
