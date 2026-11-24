@@ -387,8 +387,11 @@ mod test {
             assert!(accrued(rate, drain - 1, units) < units);
         }
 
-        // Rounding up instead: overpays and drains early.
-        assert_eq!(accrued(39, MONTH, 100_000_000), 101_088_000);
+        // Rounding up instead drains early. The nominal 30-day product is
+        // 101,088,000 units, but accrual is capped at the deposit, so a
+        // one-month balance pays exactly that balance and no more.
+        assert_eq!(39 * MONTH as i128, 101_088_000);
+        assert_eq!(accrued(39, MONTH, 100_000_000), 100_000_000);
         assert_eq!(seconds_to_deplete(39, 100_000_000), Some(2_564_103));
 
         // Sizing a 12-month deposit both ways.
