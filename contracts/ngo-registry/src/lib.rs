@@ -1,106 +1,143 @@
 // SPDX-License-Identifier: Apache-2.0
+//! NGO registry contract for the StreamGive protocol.
+//!
+//! Maintains a registry of registered and verified non-governmental organisations
+//! (NGOs). Admins and approvers can approve, reject, revoke, and renew entries;
+//! the registry is queried by the donation-vault contract before a stream is opened.
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
     Env, String, Vec,
 };
 
+/// Event emitted when an NGO registers.
 #[contractevent(topics = ["register"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RegisterEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO renames its pending application.
 #[contractevent(topics = ["renamed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenamedEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO is approved.
 #[contractevent(topics = ["approved"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApprovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO's verification is revoked.
 #[contractevent(topics = ["revoked"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RevokedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO unregisters itself.
 #[contractevent(topics = ["unregist"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UnregisteredEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an admin removes an NGO entry.
 #[contractevent(topics = ["removed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RemovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO application is rejected.
 #[contractevent(topics = ["rejected"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RejectedEvent {
     #[topic]
     pub owner: Address,
     pub reason_code: u32,
 }
 
+/// Event emitted when a new admin is proposed.
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ProposedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when a proposed admin accepts the role.
 #[contractevent(topics = ["acptadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct AcceptedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when an admin proposal is cancelled.
 #[contractevent(topics = ["canceladm"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct CancelledAdminEvent {
     pub data: (),
 }
 
+/// Event emitted when the contract is initialized.
 #[contractevent(topics = ["init"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct InitializedEvent {
     pub admin: Address,
 }
 
+/// Event emitted when the contract is upgraded.
 #[contractevent(topics = ["upgrade"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when an approver is added.
 #[contractevent(topics = ["apadd"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApproverAddedEvent {
     #[topic]
     pub approver: Address,
     pub data: (),
 }
 
+/// Event emitted when an approver is removed.
 #[contractevent(topics = ["aprem"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApproverRemovedEvent {
     #[topic]
     pub approver: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO's metadata URI is set or cleared.
 #[contractevent(topics = ["metadata"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MetadataUriSetEvent {
     #[topic]
     pub owner: Address,
     pub metadata_uri: Option<String>,
 }
 
+/// Event emitted when a verification is renewed.
 #[contractevent(topics = ["renew"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenewedEvent {
     #[topic]
     pub owner: Address,
@@ -108,7 +145,9 @@ pub struct RenewedEvent {
     pub verified_until: u64,
 }
 
+/// Event emitted when the verification period is configured.
 #[contractevent(topics = ["verperiod"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
@@ -118,8 +157,11 @@ pub struct VerifyPeriodSetEvent {
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ngo {
+    /// The address that registered and owns this NGO entry.
     pub owner: Address,
+    /// The display name of the NGO, bounded by `MAX_NGO_NAME_LEN`.
     pub name: String,
+    /// Whether an admin or approver has approved this entry.
     pub verified: bool,
     /// Optional owner-supplied reference to off-chain metadata (a website,
     /// description, or logo), so an entry can be linked to what the NGO
@@ -182,9 +224,13 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// The registry has already been initialized and cannot be initialized again.
     AlreadyInitialized = 1,
+    /// The registry has not been initialized yet.
     NotInitialized = 2,
+    /// The owner address is already registered.
     AlreadyRegistered = 3,
+    /// The owner address is not registered.
     NotRegistered = 4,
     /// The NGO has already been approved: it can no longer be unregistered,
     /// renamed, rejected, or approved again. Revoke it first.
@@ -199,6 +245,7 @@ pub enum Error {
     NoPendingAdmin = 8,
     /// The proposed administrator is not a valid replacement.
     InvalidAdmin = 9,
+    /// An arithmetic operation overflowed or underflowed its type bounds.
     ArithmeticOverflow = 10,
     /// The supplied name is empty, contains only Unicode whitespace or invisible
     /// format characters, contains control characters, or is invalid UTF-8.
