@@ -265,6 +265,8 @@ pub struct NgoRecord {
     pub owner: Address,
     pub name: String,
     pub verified: bool,
+    pub metadata_uri: Option<String>,
+    pub verified_until: Option<u64>,
 }
 
 /// Thin cross-contract interface onto the configured ngo-registry contract.
@@ -274,6 +276,7 @@ pub struct NgoRecord {
 #[allow(dead_code)]
 trait NgoRegistryInterface {
     fn get_ngo(env: Env, owner: Address) -> NgoRecord;
+    fn ngo_count(env: Env) -> u64;
 }
 
 /// A single donor -> NGO streaming donation.
@@ -555,6 +558,11 @@ pub enum Error {
     /// `modify_rate` before any funds move. Distinct from `InvalidAmount`,
     /// which only covers a zero or negative amount. See issue #340.
     StreamTooShort = 39,
+    /// `set_registry` was given an address that does not answer the
+    /// registry's `ngo_count` probe: a plain account, the vault itself, or
+    /// an unrelated contract. Storing it would make every registry check
+    /// fail closed until the admin noticed and cleared it. See issue #403.
+    InvalidRegistry = 40,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -849,7 +857,10 @@ fn max_rate_cap(env: &Env) -> Option<i128> {
 /// (the default) means no minimum is enforced, so the check in
 /// `create_stream` and `modify_rate` is skipped entirely. See issue #340.
 fn min_duration_seconds(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::MinDuration).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDuration)
+        .unwrap_or(0)
 }
 
 /// Returns true when a stream holding `balance` at a per-second `rate` would
@@ -2512,6 +2523,11 @@ impl DonationVault {
     /// Sets the NGO registry contract used to verify NGOs before a stream
     /// is opened. Admin-gated.
     ///
+    /// The candidate is probed with `ngo_count` before being stored, so a
+    /// plain account, the vault itself, or an unrelated contract is rejected
+    /// with `Error::InvalidRegistry` and the previous registry is left
+    /// untouched.
+    ///
     /// To clear an existing registry, use `clear_registry`.
     ///
     /// # Examples
@@ -2531,6 +2547,16 @@ impl DonationVault {
     /// ```
     pub fn set_registry(env: Env, registry: Address) -> Result<(), Error> {
         require_admin(&env)?;
+
+        // Probe the candidate with a harmless registry read before storing
+        // it. A plain account, the vault itself, or an unrelated contract
+        // does not answer `ngo_count`, so it is rejected here instead of
+        // being stored and failing every NGO verification afterwards.
+        NgoRegistryClient::new(&env, &registry)
+            .try_ngo_count()
+            .map_err(|_| Error::InvalidRegistry)?
+            .map_err(|_| Error::InvalidRegistry)?;
+
         env.storage().instance().set(&DataKey::Registry, &registry);
         extend_instance_ttl(&env);
 
@@ -2706,7 +2732,8 @@ impl DonationVault {
         deposit: i128,
         rate: i128,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, None, Bytes::new(&env))
+        let memo = Bytes::new(&env);
+        create_stream_inner(env, donor, ngo, token, deposit, rate, None, memo)
     }
 
     /// Creates a stream with a cliff: it stays idle until `start`, so nothing
@@ -2765,7 +2792,8 @@ impl DonationVault {
         rate: i128,
         start: u64,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, Some(start), Bytes::new(&env))
+        let memo = Bytes::new(&env);
+        create_stream_inner(env, donor, ngo, token, deposit, rate, Some(start), memo)
     }
 
     /// Creates a stream that begins accruing immediately, tagged with an
@@ -3776,7 +3804,7 @@ impl DonationVault {
         env.storage().persistent().set(&key, &stream);
 
         let old_key = DataKey::NgoStreams(old_ngo.clone());
-        if let Some(mut old_streams) = env.storage().persistent().get::<_, Vec<u64>>(&old_key) {
+        if let Some(old_streams) = env.storage().persistent().get::<_, Vec<u64>>(&old_key) {
             let mut remaining = Vec::new(&env);
             for id in old_streams.iter() {
                 if id != stream_id {

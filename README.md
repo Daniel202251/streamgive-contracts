@@ -307,7 +307,7 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 ### `donation-vault`
 
 Codes are append-only and never renumbered; the `donation-vault` enum is
-currently allocated up to code 39. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
+currently allocated up to code 40. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
 `require_admin`, so they can also return `NotInitialized` (no admin) or
 `AdminRenounced`.
 
@@ -352,6 +352,7 @@ currently allocated up to code 39. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 37 | `NoTreasury` | `sweep_surplus` was called before a treasury was configured, so the surplus has nowhere to go. | `sweep_surplus` |
 | 38 | `SweepExceedsSurplus` | `sweep_surplus` was asked to move more than the surplus above the token's committed balance, which would dip into stream funds. | `sweep_surplus` |
 | 39 | `StreamTooShort` | A stream's deposit would deplete in fewer seconds than the admin-configured `min_duration`. Distinct from `InvalidAmount`, which only covers zero or negative amounts. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `modify_rate` |
+| 40 | `InvalidRegistry` | `set_registry` was given an address that does not answer the registry's `ngo_count` probe: a plain account, the vault itself, or an unrelated contract. | `set_registry` |
 
 ### `ngo-registry`
 
