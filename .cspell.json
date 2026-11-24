@@ -13,8 +13,12 @@
     "cargo",
     "testnet",
     "mainnet",
-    "clawback"
-    "machete"
+    "clawback",
+    "machete",
+    "codegen",
+    "permissionless",
+    "initialised",
+    "timelock"
   ],
   "ignoreRegExpList": ["```[\\s\\S]*?```", "`[^`\\n]+`"],
   "ignorePaths": ["target/**", "node_modules/**"]

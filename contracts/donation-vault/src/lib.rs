@@ -989,6 +989,7 @@ fn settle(env: &Env, stream_id: u64, stream: &mut Stream, now: u64) -> Result<i1
 /// accrues — or `None` for a stream that begins accruing immediately, in which
 /// case it defaults to the current ledger time (issue #337). `memo` is the
 /// donor's optional tag, empty when none was supplied (issue #341).
+#[allow(clippy::too_many_arguments)]
 fn create_stream_inner(
     env: Env,
     donor: Address,
@@ -1578,7 +1579,7 @@ impl DonationVault {
         if start >= ngo_streams.len() {
             return ids;
         }
-        let end = (start as u32).saturating_add(capped).min(ngo_streams.len());
+        let end = start.saturating_add(capped).min(ngo_streams.len());
         for i in start..end {
             if let Some(id) = ngo_streams.get(i) {
                 ids.push_back(id);
@@ -2982,6 +2983,11 @@ impl DonationVault {
         // The accrued amount is leaving the vault, so it no longer counts
         // against the token's committed balance (issue #346).
         add_committed(&env, &stream.token, -accrued)?;
+
+        // Keep the lifetime outflow totals in step with the payout, matching
+        // the shared settle path used by the other entry points.
+        let fee = compute_fee(&env, &stream.token, accrued);
+        record_outflow_totals(&env, accrued, fee)?;
 
         let token_client = token::Client::new(&env, &stream.token);
         let payout = payout_destination(&env, &stream.ngo);
