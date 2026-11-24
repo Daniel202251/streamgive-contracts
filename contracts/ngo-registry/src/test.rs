@@ -2328,8 +2328,7 @@ fn add_approver_lists_approver_and_publishes_event() {
 
     client.add_approver(&reviewer);
 
-    assert!(client.is_approver(&reviewer));
-    assert_eq!(client.list_approvers(), vec![&env, reviewer.clone()]);
+    // Read the events before any further contract call.
     assert_eq!(
         env.events().all(),
         vec![
@@ -2341,6 +2340,9 @@ fn add_approver_lists_approver_and_publishes_event() {
             ),
         ]
     );
+
+    assert!(client.is_approver(&reviewer));
+    assert_eq!(client.list_approvers(), vec![&env, reviewer.clone()]);
 }
 
 #[test]
@@ -2364,8 +2366,7 @@ fn remove_approver_unlists_approver_and_publishes_event() {
 
     client.remove_approver(&reviewer);
 
-    assert!(!client.is_approver(&reviewer));
-    assert_eq!(client.list_approvers().len(), 0);
+    // Read the events before any further contract call.
     assert_eq!(
         env.events().all(),
         vec![
@@ -2377,6 +2378,9 @@ fn remove_approver_unlists_approver_and_publishes_event() {
             ),
         ]
     );
+
+    assert!(!client.is_approver(&reviewer));
+    assert_eq!(client.list_approvers().len(), 0);
 }
 
 #[test]
@@ -2414,13 +2418,14 @@ fn approver_can_approve_and_revoke() {
     client.register(&owner, &String::from_str(&env, "Red Cross"));
 
     client.approve_ngo(&reviewer, &owner);
-    assert!(client.get_ngo(&owner).verified);
-    // The approver, not the admin, is the sole authorizer.
+    // The approver, not the admin, is the sole authorizer. Read the auth log
+    // before any further contract call.
     assert_sole_auth(&env, &client, &reviewer, "approve_ngo");
+    assert!(client.get_ngo(&owner).verified);
 
     client.revoke_ngo(&reviewer, &owner);
-    assert!(!client.get_ngo(&owner).verified);
     assert_sole_auth(&env, &client, &reviewer, "revoke_ngo");
+    assert!(!client.get_ngo(&owner).verified);
 }
 
 #[test]
@@ -2539,7 +2544,7 @@ fn approver_does_not_gain_admin_rights() {
     }]);
 
     assert!(client.try_remove_ngo(&owner).is_err());
-    assert!(client.get_ngo(&owner).verified == false);
+    assert!(!client.get_ngo(&owner).verified);
 }
 
 // =============================================================================
@@ -2674,7 +2679,7 @@ fn non_approver_cannot_reject() {
     let result = client.try_reject_ngo(&outsider, &owner, &3);
 
     assert_eq!(result, Err(Ok(Error::NotApprover)));
-    assert!(client.get_ngo(&owner).verified == false);
+    assert!(!client.get_ngo(&owner).verified);
 }
 
 #[test]
