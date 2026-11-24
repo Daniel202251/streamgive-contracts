@@ -53,6 +53,7 @@ eligible for archival.
 | --- | --- | --- | --- |
 | `Admin` | Instance | 30d / 29d | The address that can `approve_ngo` / `revoke_ngo`. |
 | `Ngo(Address)` | Persistent | 90d / 89d | One NGO's registry entry (name, verified flag), keyed by its owner address. |
+| `OwnerByName(String)` | Persistent | 90d / 89d | The owner that claimed an NGO name, read by `owner_by_name`. Set by `register` and `update_name`, cleared by `update_name`, `unregister`, `remove_ngo` and `reject_ngo`; refreshed by `touch_ngo`. |
 
 As with `donation-vault`, the instance TTL is refreshed on every
 state-changing call via `extend_instance_ttl`. Each `Ngo(Address)` entry

@@ -2726,7 +2726,6 @@ fn reject_ngo_frees_the_index_and_lets_the_owner_register_again() {
     assert_eq!(client.total_ngos(), 3);
 }
 
-
 /// Names of the `pub fn`s in the `#[contractimpl]` block that opens with
 /// `impl_header`, read from the contract's source. Every one of them is a
 /// public entry point.
@@ -2787,9 +2786,9 @@ fn roles_doc_lists_every_entry_point() {
 
     for name in entry_point_names(SOURCE, IMPL) {
         match role_rows(ROLES, START, END).find(|(row, _)| *row == name) {
-            None => panic!(
-                "`{name}` is a public NgoRegistry entry point with no row in docs/ROLES.md"
-            ),
+            None => {
+                panic!("`{name}` is a public NgoRegistry entry point with no row in docs/ROLES.md")
+            }
             Some((_, role)) => assert!(
                 !role.is_empty(),
                 "`{name}` has an empty role in docs/ROLES.md"
@@ -2811,12 +2810,6 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
-env);
-
-    client.register(&owner, &String::from_str(&env, "Red Cross"));
-
-    assert_ttls_bumped(&env, &client, &owner);
-}
 
 // =============================================================================
 // Test for list_ngos handling removed entries (Issue 4)
@@ -2824,68 +2817,260 @@ env);
 
 #[test]
 fn list_ngos_handles_removed_entries_correctly() {
-    let (env, client, admin) = setup();
-    
+    let (env, client, _admin) = setup();
+
     // Register 5 NGOs
-    let owners: Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
-    
-    for (i, owner) in owners.iter().enumerate() {
-        let name = String::from_str(&env, &format!("NGO {}", i));
-        client.register(owner, &name);
+    let mut owners: Vec<Address> = Vec::new(&env);
+    for _ in 0..5 {
+        owners.push_back(Address::generate(&env));
     }
-    
-    // Verify we have 5 NGOs registered
-    let initial_count = client.ngo_count();
-    assert_eq!(initial_count, 5);
-    
-    // Get the initial list of all NGOs
+    for owner in owners.iter() {
+        client.register(&owner, &String::from_str(&env, "NGO"));
+    }
+    assert_eq!(client.ngo_count(), 5);
+
     let initial_page = client.list_ngos_page(&0, &10);
     assert_eq!(initial_page.owners.len(), 5);
     assert_eq!(initial_page.next, 5);
-    
+
     // Remove the NGO from the middle (index 2)
-    let middle_owner = &owners[2];
-    client.remove_ngo(middle_owner);
-    
-    // Verify count decreased
-    let after_removal_count = client.ngo_count();
-    assert_eq!(after_removal_count, 4);
-    
-    // List NGOs after removal
+    let middle_owner = owners.get(2).unwrap();
+    client.remove_ngo(&middle_owner);
+    assert_eq!(client.ngo_count(), 4);
+
     let after_removal_page = client.list_ngos_page(&0, &10);
     assert_eq!(after_removal_page.owners.len(), 4);
     assert_eq!(after_removal_page.next, 4);
-    
-    // Verify the removed NGO is not in the list
-    assert!(!after_removal_page.owners.contains(middle_owner));
-    
-    // Verify the other NGOs are still accessible
+    assert!(!after_removal_page.owners.contains(&middle_owner));
+
+    // Every other NGO is still accessible; the removed one is not.
     for (i, owner) in owners.iter().enumerate() {
         if i != 2 {
-            // All NGOs except the removed one should still be accessible
-            assert!(client.try_get_ngo(owner).is_ok());
+            assert!(client.try_get_ngo(&owner).is_ok());
         } else {
-            // The removed NGO should not be found
-            assert_eq!(client.try_get_ngo(owner), Err(Ok(Error::NotRegistered)));
+            assert_eq!(client.try_get_ngo(&owner), Err(Ok(Error::NotRegistered)));
         }
     }
-    
-    // Test pagination with removed entry
+
+    // Pagination across the removed entry still yields 4 unique NGOs.
     let first_page = client.list_ngos_page(&0, &2);
     assert_eq!(first_page.owners.len(), 2);
     assert_eq!(first_page.next, 2);
-    
+
     let second_page = client.list_ngos_page(&2, &2);
     assert_eq!(second_page.owners.len(), 2);
     assert_eq!(second_page.next, 4);
-    
-    // All pages together should have 4 unique NGOs
-    let mut all_owners_after = first_page.owners.to_vec();
-    all_owners_after.extend(second_page.owners.to_vec());
+
+    let mut all_owners_after = first_page.owners.clone();
+    all_owners_after.append(&second_page.owners);
     assert_eq!(all_owners_after.len(), 4);
-    
-    // Verify consistency: no duplicates and middle owner not present
     for owner in all_owners_after.iter() {
         assert_ne!(owner, middle_owner);
     }
+}
+
+// ── owner_by_name (issue #447) ─────────────────────────────────────────────
+
+fn name_of(env: &Env, s: &str) -> String {
+    String::from_str(env, s)
+}
+
+#[test]
+fn owner_by_name_is_none_for_an_unknown_name() {
+    let (env, client, _admin) = setup();
+    assert_eq!(client.owner_by_name(&name_of(&env, "Nobody")), None);
+}
+
+#[test]
+fn owner_by_name_finds_the_owner_after_register() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let other = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+    client.register(&other, &name_of(&env, "Green Fund"));
+
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(owner)
+    );
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Green Fund")),
+        Some(other)
+    );
+    // Exact match only.
+    assert_eq!(client.owner_by_name(&name_of(&env, "red cross")), None);
+}
+
+#[test]
+fn owner_by_name_follows_a_rename() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Exmaple NGO"));
+
+    client.update_name(&owner, &name_of(&env, "Example NGO"));
+
+    assert_eq!(client.owner_by_name(&name_of(&env, "Exmaple NGO")), None);
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Example NGO")),
+        Some(owner)
+    );
+}
+
+#[test]
+fn owner_by_name_ignores_a_rename_to_the_same_name() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+
+    client.update_name(&owner, &name_of(&env, "Red Cross"));
+
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(owner)
+    );
+}
+
+#[test]
+fn owner_by_name_is_cleared_by_unregister() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+
+    client.unregister(&owner);
+
+    assert_eq!(client.owner_by_name(&name_of(&env, "Red Cross")), None);
+}
+
+#[test]
+fn owner_by_name_is_cleared_by_remove_ngo() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+
+    client.remove_ngo(&owner);
+
+    assert_eq!(client.owner_by_name(&name_of(&env, "Red Cross")), None);
+}
+
+#[test]
+fn owner_by_name_is_cleared_by_reject_ngo() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+
+    client.reject_ngo(&admin, &owner, &1);
+
+    assert_eq!(client.owner_by_name(&name_of(&env, "Red Cross")), None);
+}
+
+#[test]
+fn owner_by_name_survives_approval_and_revocation() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &name_of(&env, "Red Cross"));
+
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(owner.clone())
+    );
+
+    client.revoke_ngo(&admin, &owner);
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(owner)
+    );
+}
+
+#[test]
+fn owner_by_name_lets_a_name_be_reused_after_the_owner_leaves() {
+    let (env, client, _admin) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.register(&first, &name_of(&env, "Red Cross"));
+    client.unregister(&first);
+
+    client.register(&second, &name_of(&env, "Red Cross"));
+
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(second)
+    );
+}
+
+#[test]
+fn owner_by_name_keeps_the_first_claimant_when_names_collide() {
+    let (env, client, _admin) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.register(&first, &name_of(&env, "Red Cross"));
+    client.register(&second, &name_of(&env, "Red Cross"));
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(first.clone())
+    );
+
+    // The unindexed owner leaving, or renaming, must not clear the first claim.
+    client.update_name(&second, &name_of(&env, "Red Cross International"));
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(first.clone())
+    );
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross International")),
+        Some(second.clone())
+    );
+
+    client.unregister(&second);
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross")),
+        Some(first)
+    );
+    assert_eq!(
+        client.owner_by_name(&name_of(&env, "Red Cross International")),
+        None
+    );
+}
+
+#[test]
+fn owner_by_name_index_survives_a_swap_and_pop_removal() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    client.register(&a, &name_of(&env, "A"));
+    client.register(&b, &name_of(&env, "B"));
+    client.register(&c, &name_of(&env, "C"));
+
+    client.remove_ngo(&a);
+
+    assert_eq!(client.owner_by_name(&name_of(&env, "A")), None);
+    assert_eq!(client.owner_by_name(&name_of(&env, "B")), Some(b));
+    assert_eq!(client.owner_by_name(&name_of(&env, "C")), Some(c));
+}
+
+#[test]
+fn touch_ngo_refreshes_the_name_index_ttl() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let name = name_of(&env, "Red Cross");
+    client.register(&owner, &name);
+    age_past_thresholds(&env, &client, &owner);
+
+    client.touch_ngo(&owner);
+
+    let ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&name_key(&env, &name))
+    });
+    assert_eq!(ttl, NGO_BUMP_AMOUNT);
+}
+
+#[test]
+fn owner_by_name_works_for_a_max_length_name() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let long = String::from_bytes(&env, &[b'a'; MAX_NGO_NAME_LEN as usize]);
+    client.register(&owner, &long);
+
+    assert_eq!(client.owner_by_name(&long), Some(owner));
 }

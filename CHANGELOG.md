@@ -143,6 +143,10 @@ This project does not yet follow a formal versioning scheme — each contract's
   addresses alongside `next`, the index to resume from, so clients can page
   through the registry without recomputing the cursor and can tell the final
   page from a full one. `list_ngos` is unchanged (#351).
+- `ngo-registry`: `owner_by_name(name)` looks up an NGO's owner address by its
+  exact name through an index kept in sync on `register`, `update_name`,
+  `unregister`, `remove_ngo` and `reject_ngo`. Entries registered before this
+  change are not indexed until they rename (#447).
 - `ngo-registry`: `verified_count()` getter so dashboards can read the number of
   verified NGOs without listing the registry. The count is backed by a
   `DataKey::VerifiedCount` instance key kept in step by every transition:
