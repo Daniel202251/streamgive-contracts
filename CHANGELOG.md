@@ -28,6 +28,9 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `donation-vault`: admin-configurable `cancel_grace_ledgers` retention for
   cancelled streams, with TTL coverage for indexing after cancellation.
 - `donation-vault`: read-only `pending_accrual` view.
+- `donation-vault`: `pause_stream` now returns `Error::StreamDrained` (40) for a
+  drained stream and `Error::StreamEmpty` (41) for an empty one instead of
+  `StreamCancelled`, which is kept for real cancellations only.
 - `donation-vault`: regression coverage for one-stroop-per-second streams and
   their zero-rounded protocol fee.
 - `DataKey` enums now derive `Debug` in both contracts for clearer storage-key

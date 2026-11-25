@@ -555,6 +555,12 @@ pub enum Error {
     /// `modify_rate` before any funds move. Distinct from `InvalidAmount`,
     /// which only covers a zero or negative amount. See issue #340.
     StreamTooShort = 39,
+    /// `pause_stream` was called on a stream that ran to completion
+    /// (`Drained`). It was not cancelled: it paid out in full.
+    StreamDrained = 40,
+    /// `pause_stream` was called on a stream whose balance is zero but that is
+    /// neither cancelled, drained nor paused, so there is nothing to pause.
+    StreamEmpty = 41,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -849,7 +855,10 @@ fn max_rate_cap(env: &Env) -> Option<i128> {
 /// (the default) means no minimum is enforced, so the check in
 /// `create_stream` and `modify_rate` is skipped entirely. See issue #340.
 fn min_duration_seconds(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::MinDuration).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDuration)
+        .unwrap_or(0)
 }
 
 /// Returns true when a stream holding `balance` at a per-second `rate` would
@@ -2706,7 +2715,16 @@ impl DonationVault {
         deposit: i128,
         rate: i128,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, None, Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream with a cliff: it stays idle until `start`, so nothing
@@ -2765,7 +2783,16 @@ impl DonationVault {
         rate: i128,
         start: u64,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, Some(start), Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            Some(start),
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream that begins accruing immediately, tagged with an
@@ -2815,6 +2842,10 @@ impl DonationVault {
 
     /// Pauses a stream after settling all accrued funds. The balance and rate
     /// are retained, while the stream no longer accrues until resumed.
+    ///
+    /// Fails with `StreamCancelled` for a cancelled stream, `StreamAlreadyPaused`
+    /// for a paused one, `StreamDrained` for one that already paid out in full,
+    /// and `StreamEmpty` for one with a zero balance that is none of those.
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<i128, Error> {
         require_not_paused(&env)?;
         let key = DataKey::Stream(stream_id);
@@ -2832,10 +2863,10 @@ impl DonationVault {
             return Err(Error::StreamAlreadyPaused);
         }
         if stream.status == StreamStatus::Drained {
-            return Err(Error::StreamCancelled);
+            return Err(Error::StreamDrained);
         }
         if stream.balance == 0 {
-            return Err(Error::StreamCancelled);
+            return Err(Error::StreamEmpty);
         }
 
         let now = env.ledger().timestamp();
