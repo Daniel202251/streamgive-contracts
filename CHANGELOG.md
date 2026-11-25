@@ -12,6 +12,10 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Added
 
+- `donation-vault`: read-only `preview_stream` view returning the estimated
+  stream duration, the effective fee, and the first validation error before a
+  stream is created. Shares its token/amount and configured-limit checks with
+  `create_stream`, so the preview cannot drift (#438).
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
   several streams in one transaction, with one authorization and one refund
   per stream. Rejects foreign or already-cancelled streams and is
