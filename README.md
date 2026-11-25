@@ -11,9 +11,13 @@ points and estimating resource costs, see [docs/GAS.md](docs/GAS.md).
 For who these contracts defend against, what the admin can and cannot do, and
 which risks are knowingly accepted, see
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+For the complete callable surface, including arguments, authorization,
+errors, and emitted events, see [docs/API.md](docs/API.md). Fee behavior and
+rounding examples are in [docs/FEES.md](docs/FEES.md).
 
 All of the guides in `docs/`, each with a one-line summary, are listed in
-[docs/README.md](docs/README.md).
+[docs/README.md](docs/README.md). If you are here to give rather than to build,
+start with the plain-language [donor's guide](docs/DONORS.md).
 
 ## Contracts
 
