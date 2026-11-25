@@ -68,6 +68,7 @@ for what works while the vault is paused, and the
 | `create_stream` | Donor | The `donor` argument signs and pays the deposit. |
 | `create_stream_with_start` | Donor | As `create_stream`. |
 | `create_stream_with_memo` | Donor | As `create_stream`. |
+| `set_memo` | Donor | The stream's donor. Rejected on a cancelled stream. |
 | `top_up` | Donor | The stream's donor. |
 | `modify_rate` | Donor | The stream's donor. |
 | `transfer_stream` | Donor | The stream's donor. |
