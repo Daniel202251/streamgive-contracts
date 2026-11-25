@@ -2811,13 +2811,6 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
-env);
-
-    client.register(&owner, &String::from_str(&env, "Red Cross"));
-
-    assert_ttls_bumped(&env, &client, &owner);
-}
-
 // =============================================================================
 // Test for list_ngos handling removed entries (Issue 4)
 // =============================================================================

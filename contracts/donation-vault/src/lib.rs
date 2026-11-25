@@ -849,7 +849,10 @@ fn max_rate_cap(env: &Env) -> Option<i128> {
 /// (the default) means no minimum is enforced, so the check in
 /// `create_stream` and `modify_rate` is skipped entirely. See issue #340.
 fn min_duration_seconds(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::MinDuration).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::MinDuration)
+        .unwrap_or(0)
 }
 
 /// Returns true when a stream holding `balance` at a per-second `rate` would
@@ -1641,6 +1644,11 @@ impl DonationVault {
             .get(&DataKey::Stream(stream_id))
             .ok_or(Error::StreamNotFound)?;
 
+        // Mirror `settle`: a paused stream accrues nothing.
+        if stream.status == StreamStatus::Paused {
+            return Ok(0);
+        }
+
         let now = env.ledger().timestamp();
         let elapsed = now.saturating_sub(accrual_base(&stream));
         Ok(math::accrued(stream.rate, elapsed, stream.balance))
@@ -1739,9 +1747,14 @@ impl DonationVault {
             .get(&DataKey::Stream(stream_id))
             .ok_or(Error::StreamNotFound)?;
 
-        let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(accrual_base(&stream));
-        let gross = math::accrued(stream.rate, elapsed, stream.balance);
+        // Mirror `settle`: a paused stream accrues nothing.
+        let gross = if stream.status == StreamStatus::Paused {
+            0
+        } else {
+            let now = env.ledger().timestamp();
+            let elapsed = now.saturating_sub(accrual_base(&stream));
+            math::accrued(stream.rate, elapsed, stream.balance)
+        };
         let fee = compute_fee(&env, &stream.token, gross);
         Ok((gross - fee, fee))
     }
@@ -2706,7 +2719,16 @@ impl DonationVault {
         deposit: i128,
         rate: i128,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, None, Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream with a cliff: it stays idle until `start`, so nothing
@@ -2765,7 +2787,16 @@ impl DonationVault {
         rate: i128,
         start: u64,
     ) -> Result<u64, Error> {
-        create_stream_inner(env, donor, ngo, token, deposit, rate, Some(start), Bytes::new(&env))
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            Some(start),
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream that begins accruing immediately, tagged with an

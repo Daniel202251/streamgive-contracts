@@ -28,6 +28,9 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `donation-vault`: admin-configurable `cancel_grace_ledgers` retention for
   cancelled streams, with TTL coverage for indexing after cancellation.
 - `donation-vault`: read-only `pending_accrual` view.
+- `donation-vault`: tests that nothing accrues while a stream is paused and that
+  accrual restarts from the resume time. `pending_accrual` and `pending_payout`
+  now return zero for a paused stream, matching what `settle` pays.
 - `donation-vault`: regression coverage for one-stroop-per-second streams and
   their zero-rounded protocol fee.
 - `DataKey` enums now derive `Debug` in both contracts for clearer storage-key
