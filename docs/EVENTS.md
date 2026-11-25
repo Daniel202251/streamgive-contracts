@@ -25,7 +25,8 @@ layout stable. Event type names include `RegisterEvent`, `RenamedEvent`,
 `UpgradedEvent`, `ConfigSnapshotEvent`, `UpgradeProposedEvent`,
 `UpgradeCancelledEvent`, `UpgradeDelaySetEvent`, `ApproverAddedEvent`,
 `ApproverRemovedEvent`,
-`MetadataUriSetEvent`, `RenewedEvent`, `VerifyPeriodSetEvent`, `CreatedEvent`,
+`MetadataUriSetEvent`, `RenewedEvent`, `VerifyPeriodSetEvent`, `RegistrationsPausedEvent`,
+`RegistrationsResumedEvent`, `CreatedEvent`,
 `WithdrawnEvent`, `DrainedEvent`, `CancelledStreamEvent`, `RescuedStreamEvent`,
 `ToppedUpEvent`, `RateModifiedEvent`, `TransferStreamEvent`,
 `PausedStreamEvent`, `ResumedStreamEvent`, and `SurplusSweptEvent`.
@@ -62,6 +63,25 @@ transfer.
 | | |
 |---|---|
 | Topics | `("canceladm",)` |
+| Data | `()` (no payload) |
+
+### `regrpause`
+
+Emitted by `pause_registrations` when the admin closes the registry to new
+applications.
+
+| | |
+|---|---|
+| Topics | `("regrpause",)` |
+| Data | `()` (no payload) |
+
+### `regresume`
+
+Emitted by `resume_registrations` when the admin re-opens the registry.
+
+| | |
+|---|---|
+| Topics | `("regresume",)` |
 | Data | `()` (no payload) |
 
 ### `register`

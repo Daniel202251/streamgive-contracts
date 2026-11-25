@@ -113,6 +113,16 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
+#[contractevent(topics = ["regrpause"], data_format = "single-value")]
+pub struct RegistrationsPausedEvent {
+    pub data: (),
+}
+
+#[contractevent(topics = ["regresume"], data_format = "single-value")]
+pub struct RegistrationsResumedEvent {
+    pub data: (),
+}
+
 #[contracttype]
 // Debug and PartialEq let tests assert_eq! on a try_* callâ€™s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
@@ -176,6 +186,10 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
+    /// Whether new NGO registrations are paused by the admin.
+    /// `true` while `pause_registrations` is in effect; absent or `false`
+    /// means registrations are open. See `pause_registrations` / `resume_registrations`.
+    RegistrationsPaused,
 }
 
 #[contracterror]
@@ -214,6 +228,9 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
+    /// `register` was called while the admin has paused new registrations.
+    /// Resume with `resume_registrations`.
+    RegistrationsPaused = 16,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -450,6 +467,20 @@ fn require_approver(env: &Env, candidate: &Address) -> Result<(), Error> {
         return Err(Error::NotApprover);
     }
     candidate.require_auth();
+    Ok(())
+}
+
+/// Returns `Err(Error::RegistrationsPaused)` if the admin has paused new
+/// registrations. Called at the top of `register` to enforce the switch.
+fn require_registrations_open(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::RegistrationsPaused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::RegistrationsPaused);
+    }
     Ok(())
 }
 
@@ -765,6 +796,129 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Prevents new NGO applications while the switch is on. Admin-gated.
+    ///
+    /// Once set, every call to `register` fails with `Error::RegistrationsPaused`
+    /// until the admin calls `resume_registrations`. All other entry points
+    /// (approve, revoke, unregister, etc.) continue to work normally.
+    /// Emits a `regrpause` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::RegistrationsPaused` if registrations are already paused.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// assert!(client.try_register(&owner, &name).is_err());
+    /// ```
+    pub fn pause_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let already: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if already {
+            return Err(Error::RegistrationsPaused);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &true);
+        extend_instance_ttl(&env);
+        RegistrationsPausedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Re-opens NGO applications after `pause_registrations`. Admin-gated.
+    ///
+    /// Emits a `regresume` event and clears the registration-paused flag so
+    /// `register` works again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::NotInitialized` if registrations are not currently paused
+    /// (the error is reused to avoid allocating a new code for a transient
+    /// state check — see `docs/UPGRADE_POLICY.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// client.resume_registrations();
+    /// assert!(!client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// client.register(&owner, &name);
+    /// ```
+    pub fn resume_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let currently_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if !currently_paused {
+            // Not paused — nothing to do; treat as a no-op error so callers
+            // know the state was already open.
+            return Err(Error::NotInitialized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &false);
+        extend_instance_ttl(&env);
+        RegistrationsResumedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns `true` while the admin has paused new NGO registrations.
+    ///
+    /// Read-only; requires no authorization.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// assert!(!client.registrations_paused());
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// ```
+    pub fn registrations_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false)
+    }
+
     /// Submits an NGO application. Callable by the NGO's own address.
     /// The entry starts unverified until an admin approves it. Names must be
     /// at most 200 bytes (`MAX_NGO_NAME_LEN`), valid UTF-8, contain at least one visible
@@ -793,6 +947,7 @@ impl NgoRegistry {
     pub fn register(env: Env, owner: Address, name: String) -> Result<(), Error> {
         owner.require_auth();
 
+        require_registrations_open(&env)?;
         validate_name(&name)?;
 
         let key = DataKey::Ngo(owner.clone());

@@ -72,6 +72,7 @@ eligible for archival.
 | `Approvers` | Instance | 30d / 29d | Addresses authorized to approve, reject, and revoke NGOs. |
 | `VerifiedCount` | Instance | 30d / 29d | Stored count of entries whose verification flag is set. |
 | `VerifyPeriod` | Instance | 30d / 29d | Verification lifetime in seconds; zero means no expiry. |
+| `RegistrationsPaused` | Instance | 30d / 29d | Whether new registrations are paused by the admin. Absent or `false` means registrations are open. |
 
 As with `donation-vault`, the instance TTL is refreshed on every
 state-changing call via `extend_instance_ttl`. Each `Ngo(Address)` entry
