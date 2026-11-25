@@ -18,7 +18,12 @@
     "codegen",
     "permissionless",
     "initialised",
-    "timelock"
+    "timelock",
+    "stroop",
+    "authorises",
+    "authorising",
+    "timelocked",
+    "sweepable"
   ],
   "ignoreRegExpList": ["```[\\s\\S]*?```", "`[^`\\n]+`"],
   "ignorePaths": ["target/**", "node_modules/**"]
