@@ -11,9 +11,13 @@ points and estimating resource costs, see [docs/GAS.md](docs/GAS.md).
 For who these contracts defend against, what the admin can and cannot do, and
 which risks are knowingly accepted, see
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+For the complete callable surface, including arguments, authorization,
+errors, and emitted events, see [docs/API.md](docs/API.md). Fee behavior and
+rounding examples are in [docs/FEES.md](docs/FEES.md).
 
 All of the guides in `docs/`, each with a one-line summary, are listed in
-[docs/README.md](docs/README.md).
+[docs/README.md](docs/README.md). If you are here to give rather than to build,
+start with the plain-language [donor's guide](docs/DONORS.md).
 
 ## Contracts
 
@@ -84,6 +88,7 @@ keep-alive, continues to work. The table below lists every public entry point.
 | `transfer_stream` | **Rejected** — `ContractPaused` |
 | `sweep_surplus` | **Rejected** — admin-gated; `ContractPaused` |
 | `cancel_stream` | **Works** — donor auth; settles accrued payouts and refunds the unspent balance |
+| `cancel_streams` | **Works** — donor auth once for the batch; cancels the listed streams all-or-nothing |
 | `rescue_stream` | **Only works while paused** — admin-only emergency path; returns `NotPaused` when the vault is active |
 | `pause` | **Rejected** when already paused — `AlreadyPaused` |
 | `unpause` | **Works** — admin auth; lifts the pause |
@@ -108,7 +113,8 @@ while the rest of the contract is frozen.
 
 `cancel_stream` is deliberately left open. It is the one ordinary path that
 returns money to a donor, so keeping it available means a pause can never trap
-a donor's unspent deposit. `rescue_stream` is the opposite: it exists only for
+a donor's unspent deposit. `cancel_streams` is its bounded batch form and is
+left open for the same reason. `rescue_stream` is the opposite: it exists only for
 incident response, is admin-only, and deliberately refuses to run while the
 vault is active.
 
@@ -315,13 +321,13 @@ currently allocated up to code 41. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | --- | --- | --- | --- |
 | 1 | `AlreadyInitialized` | `init` already created an admin. | `init` |
 | 2 | `NotInitialized` | No admin is stored. | `admin`, `propose_admin`, `cancel_admin_proposal`, `pause`, `unpause`, `set_treasury`, `clear_treasury`, `set_fee_bps`, `set_token_fee_bps`, `clear_token_fee_bps`, `set_min_deposit`, `set_cancel_grace_ledgers`, `set_max_streams_per_donor`, `set_min_duration`, `set_registry`, `renounce_admin`, `rescue_stream`, `upgrade`, `set_upgrade_delay`, `propose_upgrade`, `execute_upgrade`, `cancel_upgrade`, `sweep_surplus` |
-| 3 | `StreamNotFound` | No stream exists for the id. | `get_stream`, `pending_accrual`, `pending_payout`, `pending_refund`, `depletion_time`, `extend_stream`, `withdraw`, `withdraw_batch`, `withdraw_all`, `cancel_stream`, `rescue_stream`, `top_up`, `modify_rate`, `transfer_stream` |
+| 3 | `StreamNotFound` | No stream exists for the id. | `get_stream`, `pending_accrual`, `pending_payout`, `pending_refund`, `depletion_time`, `extend_stream`, `withdraw`, `withdraw_batch`, `withdraw_all`, `cancel_stream`, `cancel_streams`, `rescue_stream`, `top_up`, `modify_rate`, `transfer_stream` |
 | 4 | `InvalidAmount` | A deposit, rate, top-up, rate change, minimum deposit, or sweep amount was zero/negative (or a fee would swallow the first payout). | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `top_up`, `modify_rate`, `set_min_deposit`, `sweep_surplus` |
 | 5 | `NothingToWithdraw` | The stream accrued nothing since its last checkpoint. | `withdraw` |
 | 6 | `ContractPaused` | The admin paused the vault; see [Pausing](#pausing). | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `withdraw`, `withdraw_batch`, `withdraw_all`, `top_up`, `modify_rate`, `transfer_stream`, `sweep_surplus` |
 | 7 | `FeeTooHigh` | Fee above the 1,000 bps (10%) cap. | `set_fee_bps`, `set_token_fee_bps` |
 | 8 | `NoPendingAdmin` | No admin proposal is pending. | `accept_admin`, `cancel_admin_proposal` |
-| 9 | `ArithmeticOverflow` | Checked balance, total, counter, or grace-ledger arithmetic left `i128`/`u64` range. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `withdraw`, `withdraw_batch`, `withdraw_all`, `cancel_stream`, `top_up`, `modify_rate`, `transfer_stream`, `set_cancel_grace_ledgers` |
+| 9 | `ArithmeticOverflow` | Checked balance, total, counter, or grace-ledger arithmetic left `i128`/`u64` range. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `withdraw`, `withdraw_batch`, `withdraw_all`, `cancel_stream`, `cancel_streams`, `top_up`, `modify_rate`, `transfer_stream`, `set_cancel_grace_ledgers` |
 | 10 | `SelfStream` | Donor and NGO are the same address. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo` |
 | 11 | `InvalidTreasury` | Treasury address is the vault itself. | `set_treasury` |
 | 12 | `AlreadyPaused` | `pause` called while already paused. | `pause` |
@@ -336,8 +342,8 @@ currently allocated up to code 41. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 21 | `FeeRequiresTreasury` | A non-zero fee was set with no treasury, or the treasury was cleared while a fee is set. | `set_fee_bps`, `set_token_fee_bps`, `clear_treasury` |
 | 22 | `NotPaused` | `rescue_stream` called while the vault is active. | `rescue_stream` |
 | 23 | `MixedNgo` | A batch withdrawal mixed streams belonging to different NGOs. | `withdraw_batch` |
-| 24 | `BatchLimitExceeded` | Too many ids in one batch call. | `get_streams`, `withdraw_batch` |
-| 25 | `DuplicateStreamId` | The same stream id appears twice in a batch withdrawal. | `withdraw_batch` |
+| 24 | `BatchLimitExceeded` | Too many ids in one batch call. | `get_streams`, `withdraw_batch`, `cancel_streams` |
+| 25 | `DuplicateStreamId` | The same stream id appears twice in a batch call. | `withdraw_batch`, `cancel_streams` |
 | 26 | `InvalidNgo` | The NGO is the vault's own address. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo` |
 | 27 | `InvalidToken` | The token is the vault's own address. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo` |
 | 28 | `StreamPaused` | `withdraw`/`withdraw_batch`/`withdraw_all` called on a stream whose donor paused it with `pause_stream`. | `withdraw`, `withdraw_batch`, `withdraw_all` |
