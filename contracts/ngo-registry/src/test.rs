@@ -2328,8 +2328,7 @@ fn add_approver_lists_approver_and_publishes_event() {
 
     client.add_approver(&reviewer);
 
-    assert!(client.is_approver(&reviewer));
-    assert_eq!(client.list_approvers(), vec![&env, reviewer.clone()]);
+    // Read the events before any further contract call replaces them.
     assert_eq!(
         env.events().all(),
         vec![
@@ -2341,6 +2340,8 @@ fn add_approver_lists_approver_and_publishes_event() {
             ),
         ]
     );
+    assert!(client.is_approver(&reviewer));
+    assert_eq!(client.list_approvers(), vec![&env, reviewer.clone()]);
 }
 
 #[test]
@@ -2364,8 +2365,7 @@ fn remove_approver_unlists_approver_and_publishes_event() {
 
     client.remove_approver(&reviewer);
 
-    assert!(!client.is_approver(&reviewer));
-    assert_eq!(client.list_approvers().len(), 0);
+    // Read the events before any further contract call replaces them.
     assert_eq!(
         env.events().all(),
         vec![
@@ -2377,6 +2377,8 @@ fn remove_approver_unlists_approver_and_publishes_event() {
             ),
         ]
     );
+    assert!(!client.is_approver(&reviewer));
+    assert_eq!(client.list_approvers().len(), 0);
 }
 
 #[test]
@@ -2414,13 +2416,14 @@ fn approver_can_approve_and_revoke() {
     client.register(&owner, &String::from_str(&env, "Red Cross"));
 
     client.approve_ngo(&reviewer, &owner);
-    assert!(client.get_ngo(&owner).verified);
-    // The approver, not the admin, is the sole authorizer.
+    // The approver, not the admin, is the sole authorizer. Check before any
+    // other contract call replaces the recorded auths.
     assert_sole_auth(&env, &client, &reviewer, "approve_ngo");
+    assert!(client.get_ngo(&owner).verified);
 
     client.revoke_ngo(&reviewer, &owner);
-    assert!(!client.get_ngo(&owner).verified);
     assert_sole_auth(&env, &client, &reviewer, "revoke_ngo");
+    assert!(!client.get_ngo(&owner).verified);
 }
 
 #[test]

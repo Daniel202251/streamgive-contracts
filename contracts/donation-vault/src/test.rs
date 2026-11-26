@@ -176,7 +176,7 @@ fn full_lifecycle_create_accrue_withdraw_cancel() {
         withdrew,
         (
             (symbol_short!("withdraw"), stream_id).into_val(&s.env),
-            (500i128, 0i128, 500i128).into_val(&s.env),
+            (500i128, 0i128, 500i128, s.ngo.clone()).into_val(&s.env),
         )
     );
     assert_eq!(s.token.balance(&s.ngo), 500);
@@ -972,22 +972,31 @@ fn pause_blocks_fund_movement_but_allows_cancel_and_queries() {
         Err(Ok(Error::ContractPaused)),
         "sweep_surplus should be blocked"
     );
+    assert_eq!(
+        s.client
+            .try_sweep_surplus_to(&s.token.address, &100, &Address::generate(&s.env)),
+        Err(Ok(Error::ContractPaused)),
+        "sweep_surplus_to should be blocked"
+    );
 
     // cancel_stream always works (emergency exit for donors)
     let refund = s.client.cancel_stream(&stream_id);
     assert_eq!(refund, 900); // 1000 - 100 that accrued
     assert_eq!(s.token.balance(&s.ngo), 100);
-    assert_eq!(s.token.balance(&s.donor), 2_100);
+    assert_eq!(s.token.balance(&s.donor), 2_900);
 
     // rescue_stream requires the vault to be paused
     s.token_admin.mint(&s.donor, &500);
+    // Creating a stream needs an unpaused vault, so open it first and pause
+    // again before the rescue.
+    s.client.unpause();
     let stream_id2 = s
         .client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &10);
     s.client.pause();
     let rescued = s.client.rescue_stream(&stream_id2);
     assert_eq!(rescued, 500);
-    assert_eq!(s.token.balance(&s.donor), 2_600);
+    assert_eq!(s.token.balance(&s.donor), 3_400);
 
     // Read-only operations still work
     assert!(s.client.get_stream(&stream_id).cancelled);
@@ -2689,12 +2698,12 @@ fn modify_rate_past_i128_max_withdrawn_returns_overflow_error() {
 }
 
 #[test]
-fn create_and_top_up_near_i128_max() {
+fn create_and_top_up_near_token_max() {
     let s = setup();
-    // Create a stream with a deposit near i128::MAX
-    let max_deposit = i128::MAX - 1000;
+    // The Stellar asset contract used in tests caps balances at i64::MAX, so
+    // this is the largest deposit the token can hold and move.
+    let max_deposit = i64::MAX as i128;
     s.token_admin.mint(&s.donor, &max_deposit);
-    s.token_admin.mint(&s.donor, &2000); // Extra for top-ups
 
     let stream_id = s
         .client
@@ -2710,6 +2719,9 @@ fn create_and_top_up_near_i128_max() {
     let withdrawn = s.client.withdraw(&stream_id);
     assert_eq!(withdrawn, 500);
     assert_eq!(s.client.get_stream(&stream_id).balance, max_deposit - 500);
+
+    // Fund the donor again now that the deposit sits in the vault.
+    s.token_admin.mint(&s.donor, &2000);
 
     // Top-up with an amount that would stay within bounds
     s.client.top_up(&stream_id, &100);
@@ -4275,13 +4287,15 @@ fn pause_resume_top_up_cancel_and_outflow_totals() {
     s.client.resume_stream(&stream_id);
     assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
     s.env.ledger().with_mut(|l| l.timestamp += 10);
-    assert_eq!(s.client.withdraw(&stream_id), 100);
+    // `withdraw` returns the net payout (gross minus the 5% fee).
+    assert_eq!(s.client.withdraw(&stream_id), 95);
     assert_eq!(s.client.total_withdrawn(), 200);
 
     s.client.cancel_stream(&stream_id);
     let config = s.client.get_config();
     assert_eq!(config.total_withdrawn, 200);
-    assert_eq!(config.total_fees_collected, 100);
+    // 5% of each 100-unit payout, twice.
+    assert_eq!(config.total_fees_collected, 10);
 }
 
 #[test]
@@ -4537,6 +4551,128 @@ fn create_stream_cost_stays_flat_as_one_ngo_gains_streams() {
         STREAM_COUNT,
         memory_limit,
     );
+}
+
+#[test]
+fn active_streams_by_ngo_skips_finished_streams_across_pages() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &6_000);
+
+    let s1 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s2 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s3 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s4 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s5 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let s6 = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // s4 is paused while still funded, so it stays live.
+    s.client.pause_stream(&s4);
+    // 100 s at 10/s drains s2 exactly; s3 is cancelled.
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&s2);
+    s.client.cancel_stream(&s3);
+
+    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Drained);
+    assert_eq!(s.client.get_stream(&s3).status, StreamStatus::Cancelled);
+    assert_eq!(s.client.get_stream(&s4).status, StreamStatus::Paused);
+
+    // The first page fills with the two live streams in this window, skipping
+    // the drained and cancelled slots between them.
+    let first_page = s.client.active_streams_by_ngo(&s.ngo, &0, &2);
+    assert_eq!(first_page.ids.len(), 2);
+    assert_eq!(first_page.ids.get(0), Some(s1));
+    assert_eq!(first_page.ids.get(1), Some(s4));
+    assert_eq!(first_page.next, 4);
+
+    let second_page = s.client.active_streams_by_ngo(&s.ngo, &first_page.next, &2);
+    assert_eq!(second_page.ids.len(), 2);
+    assert_eq!(second_page.ids.get(0), Some(s5));
+    assert_eq!(second_page.ids.get(1), Some(s6));
+    assert_eq!(second_page.next, 6);
+
+    let done = s
+        .client
+        .active_streams_by_ngo(&s.ngo, &second_page.next, &2);
+    assert!(done.ids.is_empty());
+    assert_eq!(done.next, 6);
+
+    // The unfiltered view still reports every slot, including finished ones.
+    assert_eq!(s.client.streams_by_ngo(&s.ngo, &0, &10).len(), 6);
+}
+
+#[test]
+fn active_streams_by_ngo_advances_past_a_window_with_no_live_streams() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &3_000);
+
+    let a = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let b = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let c = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&a);
+    s.client.cancel_stream(&b);
+    s.client.withdraw(&c);
+
+    // No live streams, but the cursor still advances to the end of the
+    // examined window so the caller can tell "nothing here" from "done".
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &2);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 3);
+
+    let done = s.client.active_streams_by_ngo(&s.ngo, &page.next, &2);
+    assert!(done.ids.is_empty());
+    assert_eq!(done.next, 3);
+}
+
+#[test]
+fn active_streams_by_ngo_edge_cases_return_a_usable_next() {
+    let s = setup();
+
+    // Unknown NGO: nothing to page.
+    let unknown = Address::generate(&s.env);
+    let page = s.client.active_streams_by_ngo(&unknown, &0, &10);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 0);
+
+    s.token_admin.mint(&s.donor, &1_000);
+    let id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // Starting at or past the end reports no progress.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &1, &10);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 1);
+
+    // A zero limit examines nothing rather than looping.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &0);
+    assert!(page.ids.is_empty());
+    assert_eq!(page.next, 0);
+
+    // An oversized limit is clamped to the scan window.
+    let page = s.client.active_streams_by_ngo(&s.ngo, &0, &10_000);
+    assert_eq!(page.ids.len(), 1);
+    assert_eq!(page.ids.get(0), Some(id));
+    assert_eq!(page.next, 1);
 }
 
 #[test]
@@ -5058,6 +5194,137 @@ fn sweep_surplus_rejected_while_paused() {
     s.client.pause();
 
     let result = s.client.try_sweep_surplus(&s.token.address, &1);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn sweep_surplus_to_sends_to_explicit_destination_and_publishes_event() {
+    let s = setup();
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &1_500);
+    let _stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.token.transfer(&s.donor, &s.client.address, &500);
+
+    let swept = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &500, &destination);
+    assert!(swept.is_ok());
+
+    assert_last_event(
+        &s.env,
+        (symbol_short!("sweep"), s.token.address.clone()),
+        (500i128, destination.clone()),
+    );
+
+    // The explicit destination wins over the configured treasury, which is
+    // left untouched; the stream's committed funds stay in the vault.
+    assert_eq!(s.token.balance(&destination), 500);
+    assert_eq!(s.token.balance(&treasury), 0);
+    assert_eq!(s.token.balance(&s.client.address), 1_000);
+    assert_eq!(s.client.committed_balance(&s.token.address), 1_000);
+}
+
+#[test]
+fn sweep_surplus_to_works_without_a_treasury() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &100);
+    s.token.transfer(&s.donor, &s.client.address, &100);
+
+    // No treasury is configured, so `sweep_surplus` would fail with
+    // NoTreasury; the explicit destination needs none.
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &100, &destination);
+    assert!(result.is_ok());
+    assert_eq!(s.token.balance(&destination), 100);
+    assert_eq!(s.client.surplus(&s.token.address), 0);
+}
+
+#[test]
+fn sweep_surplus_to_respects_the_surplus_bound() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.token_admin.mint(&s.donor, &1_400);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.token.transfer(&s.donor, &s.client.address, &400);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &401, &destination);
+    assert_eq!(result, Err(Ok(Error::SweepExceedsSurplus)));
+    assert_eq!(s.token.balance(&destination), 0);
+
+    s.client
+        .sweep_surplus_to(&s.token.address, &400, &destination);
+    assert_eq!(s.token.balance(&destination), 400);
+    assert_eq!(s.token.balance(&s.client.address), 1_000);
+
+    // The stream can still draw down its full committed deposit.
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&stream_id);
+    assert_eq!(s.token.balance(&s.ngo), 1_000);
+}
+
+#[test]
+fn sweep_surplus_to_rejects_the_vault_as_destination() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &100);
+    s.token.transfer(&s.donor, &s.client.address, &100);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &100, &s.client.address);
+    assert_eq!(result, Err(Ok(Error::InvalidSweepDestination)));
+    assert_eq!(s.token.balance(&s.client.address), 100);
+}
+
+#[test]
+fn sweep_surplus_to_rejects_non_positive_amount() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &0, &destination);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &-1, &destination);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn sweep_surplus_to_requires_admin() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+
+    s.env.mock_auths(&[]);
+    assert!(s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &1, &destination)
+        .is_err());
+}
+
+#[test]
+fn sweep_surplus_to_rejected_while_paused() {
+    let s = setup();
+    let destination = Address::generate(&s.env);
+    s.client.pause();
+
+    let result = s
+        .client
+        .try_sweep_surplus_to(&s.token.address, &1, &destination);
     assert_eq!(result, Err(Ok(Error::ContractPaused)));
 }
 
@@ -5716,12 +5983,16 @@ fn modify_rate_increase_rejects_unverified_ngo() {
     let (s, registry) = setup_with_registry();
     s.token_admin.mint(&s.donor, &1_000);
 
-    // Register but don't approve the NGO
+    // The NGO must be verified to open a stream, so verify it first and then
+    // revoke it to reach the unverified state under test.
     registry.register(&s.ngo, &soroban_sdk::String::from_str(&s.env, "Red Cross"));
+    registry.approve_ngo(&s.client.admin(), &s.ngo);
 
     let stream_id = s
         .client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    registry.revoke_ngo(&s.client.admin(), &s.ngo);
 
     // Attempting to increase rate should fail with NgoNotVerified
     let result = s.client.try_modify_rate(&stream_id, &20);
@@ -5738,12 +6009,16 @@ fn modify_rate_decrease_allows_unverified_ngo() {
     let (s, registry) = setup_with_registry();
     s.token_admin.mint(&s.donor, &1_000);
 
-    // Register but don't approve the NGO
+    // Verify to open the stream, then revoke so the NGO is unverified when the
+    // rate is decreased.
     registry.register(&s.ngo, &soroban_sdk::String::from_str(&s.env, "Red Cross"));
+    registry.approve_ngo(&s.client.admin(), &s.ngo);
 
     let stream_id = s
         .client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    registry.revoke_ngo(&s.client.admin(), &s.ngo);
 
     // Decreasing rate should succeed even for unverified NGO
     s.client.modify_rate(&stream_id, &5);
@@ -6391,13 +6666,13 @@ fn withdraw_pays_configured_payout_address() {
     s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 accrues
 
     let net = s.client.withdraw(&stream_id);
+    let withdrew = last_event(&s.env);
 
     assert_eq!(net, 500);
     assert_eq!(s.token.balance(&payout), 500);
     // The owner key only authorised; it received nothing.
     assert_eq!(s.token.balance(&s.ngo), 0);
 
-    let withdrew = last_event(&s.env);
     assert_eq!(
         withdrew,
         (
@@ -6790,10 +7065,6 @@ fn withdraw_that_empties_stream_emits_drained_event() {
 
     s.client.withdraw(&stream_id);
 
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Drained
-    );
     // The plain `withdraw` comes first, then the terminal `drained`, so an
     // indexer observes the payout before the status change.
     assert_nth_last_event(
@@ -6803,6 +7074,10 @@ fn withdraw_that_empties_stream_emits_drained_event() {
         (1_000i128, 0i128, 1_000i128, s.ngo.clone()),
     );
     assert_last_event(&s.env, (symbol_short!("drained"), stream_id), (1_000i128,));
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
+    );
 }
 
 #[test]
@@ -6817,13 +7092,13 @@ fn withdraw_that_leaves_balance_emits_no_drained_event() {
 
     s.client.withdraw(&stream_id);
 
-    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
     assert_last_event(
         &s.env,
         (symbol_short!("withdraw"), stream_id),
         (500i128, 0i128, 500i128, s.ngo.clone()),
     );
     assert_eq!(count_events_with_topic(&s.env, symbol_short!("drained")), 0);
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
 }
 
 #[test]
@@ -6840,12 +7115,12 @@ fn later_withdraw_that_empties_stream_reports_cumulative_total_paid() {
     s.env.ledger().with_mut(|l| l.timestamp += 50);
     s.client.withdraw(&stream_id); // empties the rest
 
+    // `total_paid` is the stream's lifetime total, not just this withdrawal.
+    assert_last_event(&s.env, (symbol_short!("drained"), stream_id), (1_000i128,));
     assert_eq!(
         s.client.get_stream(&stream_id).status,
         StreamStatus::Drained
     );
-    // `total_paid` is the stream's lifetime total, not just this withdrawal.
-    assert_last_event(&s.env, (symbol_short!("drained"), stream_id), (1_000i128,));
 }
 
 #[test]
@@ -6868,9 +7143,6 @@ fn withdraw_batch_emits_drained_event_after_the_streams_withdraw() {
     ids.push_back(s2);
     s.client.withdraw_batch(&ids);
 
-    assert_eq!(s.client.get_stream(&s1).status, StreamStatus::Drained);
-    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Active);
-
     // Only the stream this batch emptied carries a `drained` event, and it
     // follows that stream's `withdraw`.
     assert_eq!(count_events_with_topic(&s.env, symbol_short!("drained")), 1);
@@ -6886,6 +7158,8 @@ fn withdraw_batch_emits_drained_event_after_the_streams_withdraw() {
         (symbol_short!("withdraw"), s2),
         (1_000i128, 0i128, 1_000i128, s.ngo.clone()),
     );
+    assert_eq!(s.client.get_stream(&s1).status, StreamStatus::Drained);
+    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Active);
 }
 
 #[test]
@@ -6907,9 +7181,6 @@ fn withdraw_batch_emits_drained_event_for_every_emptied_stream() {
     ids.push_back(s2);
     s.client.withdraw_batch(&ids);
 
-    assert_eq!(s.client.get_stream(&s1).status, StreamStatus::Drained);
-    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Drained);
-
     // One `drained` per emptied stream, each after its own `withdraw`.
     assert_eq!(count_events_with_topic(&s.env, symbol_short!("drained")), 2);
     assert_nth_last_event(
@@ -6926,6 +7197,8 @@ fn withdraw_batch_emits_drained_event_for_every_emptied_stream() {
         (2_000i128, 0i128, 2_000i128, s.ngo.clone()),
     );
     assert_last_event(&s.env, (symbol_short!("drained"), s2), (2_000i128,));
+    assert_eq!(s.client.get_stream(&s1).status, StreamStatus::Drained);
+    assert_eq!(s.client.get_stream(&s2).status, StreamStatus::Drained);
 }
 
 #[test]
@@ -6940,10 +7213,6 @@ fn modify_rate_that_empties_stream_emits_drained_event() {
 
     s.client.modify_rate(&stream_id, &20);
 
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Drained
-    );
     // The settle-driven `drained` precedes the `ratemod` that triggered it.
     assert_nth_last_event(
         &s.env,
@@ -6955,6 +7224,10 @@ fn modify_rate_that_empties_stream_emits_drained_event() {
         &s.env,
         (symbol_short!("ratemod"), stream_id),
         (10i128, 20i128, 1_000i128),
+    );
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
     );
 }
 
@@ -6971,10 +7244,6 @@ fn transfer_stream_that_empties_stream_emits_drained_event() {
 
     s.client.transfer_stream(&stream_id, &new_ngo);
 
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Drained
-    );
     assert_nth_last_event(
         &s.env,
         1,
@@ -6985,6 +7254,10 @@ fn transfer_stream_that_empties_stream_emits_drained_event() {
         &s.env,
         (symbol_short!("transfer"), stream_id),
         (s.ngo.clone(), new_ngo.clone(), 1_000i128),
+    );
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
     );
 }
 
@@ -7001,10 +7274,6 @@ fn pause_stream_that_empties_stream_emits_drained_event() {
     let settled = s.client.pause_stream(&stream_id);
 
     assert_eq!(settled, 1_000);
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Drained
-    );
     assert_nth_last_event(
         &s.env,
         1,
@@ -7015,6 +7284,10 @@ fn pause_stream_that_empties_stream_emits_drained_event() {
         &s.env,
         (symbol_short!("strmpause"), stream_id),
         (1_000i128,),
+    );
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
     );
 }
 
@@ -7032,15 +7305,15 @@ fn cancel_stream_that_settles_to_zero_emits_no_drained_event() {
 
     s.client.cancel_stream(&stream_id);
 
-    assert_eq!(
-        s.client.get_stream(&stream_id).status,
-        StreamStatus::Cancelled
-    );
     assert_eq!(count_events_with_topic(&s.env, symbol_short!("drained")), 0);
     assert_last_event(
         &s.env,
         (symbol_short!("cancel"), stream_id),
         (1_000i128, 0i128),
+    );
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Cancelled
     );
 }
 
@@ -7245,7 +7518,9 @@ fn accrual_with_max_elapsed_and_large_rate_never_overflows() {
 #[test]
 fn accrual_near_u64_max_with_various_rates() {
     let s = setup();
-    let balance: i128 = i128::MAX;
+    // Large enough that rate * elapsed overflows i128 for every rate below,
+    // while staying inside the asset contract's balance limit.
+    let balance: i128 = 1_000_000_000_000_000_000;
     let elapsed = u64::MAX - 100;
 
     for rate in [1i128, 100, 10_000, 1_000_000, i128::MAX / 2] {
@@ -7255,7 +7530,7 @@ fn accrual_near_u64_max_with_various_rates() {
             .client
             .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
 
-        s.env.ledger().with_mut(|l| l.timestamp += elapsed);
+        s.env.ledger().with_mut(|l| l.timestamp = elapsed);
 
         // Should always be capped at balance, never overflow or panic
         let accrued = s.client.pending_accrual(&stream_id);

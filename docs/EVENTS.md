@@ -586,19 +586,21 @@ timelock lasts.
 
 ### `sweep`
 
-Emitted by `sweep_surplus` when an admin moves tokens that were sent to the
-vault by mistake to the treasury.
+Emitted by `sweep_surplus` and `sweep_surplus_to` when an admin moves tokens
+that were sent to the vault by mistake to an explicit destination.
 
 | | |
 |---|---|
 | Topics | `("sweep", token: Address)` |
-| Data | `(amount: i128, treasury: Address)` |
+| Data | `(amount: i128, destination: Address)` |
 
 `amount` never exceeds the surplus above the token's committed balance (the sum
 of stream balances the vault holds), so a sweep can never touch funds belonging
-to streams. `treasury` is the payout address the surplus went to. An indexer can
-reconstruct the recoverable surplus at any time as the vault's token balance
-minus `committed_balance(token)` (#346).
+to streams. `destination` is the address the surplus went to: the configured
+treasury for `sweep_surplus`, or the caller-supplied address for
+`sweep_surplus_to` (#439). An indexer can reconstruct the recoverable surplus
+at any time as the vault's token balance minus `committed_balance(token)`
+(#346).
 
 ### `rescue`
 

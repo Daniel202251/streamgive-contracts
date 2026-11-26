@@ -218,9 +218,24 @@ This project does not yet follow a formal versioning scheme — each contract's
   balance (the sum of its streams' `balance`) before `sweep_surplus` is used, or
   the whole token balance would read as sweepable surplus. No such deployment
   exists yet, so no migration entry point is added.
+- `donation-vault`: admin-gated `sweep_surplus_to(token, amount, destination)`
+  recovers misplaced tokens to an explicit address without requiring a
+  configured treasury. It applies the same committed-balance ceiling as
+  `sweep_surplus`, rejects the vault itself with
+  `Error::InvalidSweepDestination` (code 40), and emits `sweep` naming the
+  destination (#439).
+- `donation-vault`: read-only `active_streams_by_ngo(ngo, start, limit)` pages
+  through an NGO's live streams only, skipping `Cancelled` and `Drained` ones.
+  It returns an `ActiveStreamsPage` with the ids plus the `next` position to
+  continue from, so callers can enumerate open positions without fetching
+  finished streams (#440).
 
 ### Changed
 
+- `donation-vault`: the `sweep` event's final data field is now named
+  `destination` instead of `treasury`, since `sweep_surplus_to` can send the
+  surplus anywhere. Positional XDR encoding is unchanged, so existing indexers
+  keep decoding it (#439).
 - **BREAKING** `ngo-registry`: `approve_ngo`, `batch_approve`, and `revoke_ngo`
   now take the acting address as a leading argument
   (`approve_ngo(approver: Address, ngo_owner: Address)`,
