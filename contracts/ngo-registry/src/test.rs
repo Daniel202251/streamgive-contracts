@@ -4435,3 +4435,82 @@ fn name_uniqueness_is_enforced_across_case_and_whitespace_together() {
     let result = client.try_register(&b, &String::from_str(&env, "red cross"));
     assert_eq!(result, Err(Ok(Error::NameTaken)));
 }
+
+#[test]
+#[ignore] // Remove this when owner transfer is implemented
+fn ngo_owner_transfer_preserves_verified_flag() {
+    let (env, client, admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    // Register and verify an NGO
+    client.register(&old_owner, &name);
+    client.approve_ngo(&admin, &old_owner);
+    assert!(client.is_verified(&old_owner));
+    
+    // TODO: When implemented, uncomment these lines:
+    // Propose owner transfer
+    // client.propose_ngo_owner(&old_owner, &new_owner);
+    
+    // Accept transfer
+    // client.accept_ngo_owner(&new_owner);
+    
+    // Verify the new owner is verified
+    // assert!(client.is_verified(&new_owner));
+    
+    // Verify the old owner is no longer registered
+    // assert!(!client.is_verified(&old_owner));
+    // assert_eq!(client.try_get_ngo(&old_owner), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+#[ignore] // Remove this when owner transfer is implemented
+fn ngo_owner_transfer_cancel_keeps_original_owner() {
+    let (env, client, admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    // Register and verify an NGO
+    client.register(&old_owner, &name);
+    client.approve_ngo(&admin, &old_owner);
+    
+    // TODO: When implemented, uncomment these lines:
+    // Propose owner transfer
+    // client.propose_ngo_owner(&old_owner, &new_owner);
+    
+    // Cancel the proposal
+    // client.cancel_ngo_owner_proposal(&old_owner);
+    
+    // Verify old owner still verified
+    assert!(client.is_verified(&old_owner));
+    
+    // Verify new owner is not registered
+    // assert!(!client.is_verified(&new_owner));
+    // assert_eq!(client.try_get_ngo(&new_owner), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+#[ignore] // Remove this when owner transfer is implemented  
+fn ngo_owner_transfer_does_not_break_existing_streams() {
+    let (env, client, admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    // Register and verify an NGO
+    client.register(&old_owner, &name);
+    client.approve_ngo(&admin, &old_owner);
+    
+    // TODO: When implemented, uncomment and test that:
+    // 1. Existing donation streams to old_owner address still work
+    // 2. After transfer, new streams can be created to new_owner
+    // 3. Verification status transfers correctly
+    
+    // This test would need integration with donation-vault contract
+    // to fully verify streams are not broken
+}
