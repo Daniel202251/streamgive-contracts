@@ -368,12 +368,7 @@ pub fn settle_core(env: &Env, stream: &mut Stream, now: u64) -> Result<i128, Err
 /// Settles a stream and, if that emptied it, publishes the `drained` event
 /// (issue #344). Wraps [`settle_core`] so every settle-driven drain announces
 /// the transition exactly once, from the same place the status flips.
-pub fn settle(
-    env: &Env,
-    stream_id: u64,
-    stream: &mut Stream,
-    now: u64,
-) -> Result<i128, Error> {
+pub fn settle(env: &Env, stream_id: u64, stream: &mut Stream, now: u64) -> Result<i128, Error> {
     use crate::events::DrainedEvent;
     let was_active = stream.status == StreamStatus::Active;
     let accrued = settle_core(env, stream, now)?;
