@@ -10,6 +10,10 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ## [Unreleased]
 
+### Changed
+
+- `donation-vault`: split `lib.rs` into `events.rs`, `types.rs`, and `storage.rs` modules. No behaviour change. See issue #393.
+
 ### Added
 
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
