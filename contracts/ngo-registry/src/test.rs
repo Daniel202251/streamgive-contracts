@@ -2836,27 +2836,30 @@ fn ngo_owner_transfer_preserves_verified_flag_on_propose() {
     let (env, client, admin) = setup();
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     // Register and verify an NGO
     client.register(&old_owner, &String::from_str(&env, "Red Cross"));
     client.approve_ngo(&admin, &old_owner);
-    
+
     // Verify the NGO is verified before transfer
     assert!(client.is_verified(&old_owner));
     let ngo_before = client.get_ngo(&old_owner);
     assert!(ngo_before.verified);
-    
+
     // Propose owner transfer (feature not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
-    
+
     // After proposal, the old owner should still be verified and the entry unchanged
     assert!(client.is_verified(&old_owner));
     let ngo_after_propose = client.get_ngo(&old_owner);
     assert!(ngo_after_propose.verified);
     assert_eq!(ngo_after_propose.owner, old_owner);
-    
+
     // The new owner should not have an NGO entry yet
-    assert_eq!(client.try_get_ngo(&new_owner), Err(Ok(Error::NotRegistered)));
+    assert_eq!(
+        client.try_get_ngo(&new_owner),
+        Err(Ok(Error::NotRegistered))
+    );
 }
 
 #[test]
@@ -2865,29 +2868,38 @@ fn ngo_owner_transfer_preserves_verified_flag_on_accept() {
     let (env, client, admin) = setup();
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     // Register and verify an NGO
     client.register(&old_owner, &String::from_str(&env, "Red Cross"));
     client.approve_ngo(&admin, &old_owner);
-    
+
     // Verify the NGO is verified before transfer
     assert!(client.is_verified(&old_owner));
-    
+
     // Propose and accept owner transfer (features not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
     // client.accept_ngo_owner(&new_owner);
-    
+
     // After acceptance:
     // 1. The new owner should have the NGO with verified flag preserved
     let new_ngo = client.get_ngo(&new_owner);
     assert_eq!(new_ngo.owner, new_owner);
-    assert!(new_ngo.verified, "verified flag must be preserved after owner transfer");
+    assert!(
+        new_ngo.verified,
+        "verified flag must be preserved after owner transfer"
+    );
     assert!(client.is_verified(&new_owner));
-    
+
     // 2. The old owner should no longer have an NGO entry
-    assert_eq!(client.try_get_ngo(&old_owner), Err(Ok(Error::NotRegistered)));
-    assert!(!client.is_verified(&old_owner), "old owner should not be verified after transfer");
-    
+    assert_eq!(
+        client.try_get_ngo(&old_owner),
+        Err(Ok(Error::NotRegistered))
+    );
+    assert!(
+        !client.is_verified(&old_owner),
+        "old owner should not be verified after transfer"
+    );
+
     // 3. Existing streams pointing to the old owner address should still be valid
     // (This would be tested in donation-vault tests, but the registry transfer
     // must not break them by invalidating the NGO)
@@ -2899,21 +2911,21 @@ fn ngo_owner_transfer_cancel_keeps_original_owner_verified() {
     let (env, client, admin) = setup();
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     // Register and verify an NGO
     client.register(&old_owner, &String::from_str(&env, "Red Cross"));
     client.approve_ngo(&admin, &old_owner);
-    
+
     // Verify the NGO is verified before transfer
     assert!(client.is_verified(&old_owner));
     let ngo_before = client.get_ngo(&old_owner);
-    
+
     // Propose owner transfer (feature not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
-    
+
     // Cancel the proposal (feature not yet implemented)
     // client.cancel_ngo_owner_proposal(&old_owner);
-    
+
     // After cancellation:
     // 1. The old owner should still be verified with unchanged entry
     assert!(client.is_verified(&old_owner));
@@ -2921,9 +2933,12 @@ fn ngo_owner_transfer_cancel_keeps_original_owner_verified() {
     assert!(ngo_after_cancel.verified);
     assert_eq!(ngo_after_cancel.owner, old_owner);
     assert_eq!(ngo_after_cancel.name, ngo_before.name);
-    
+
     // 2. The new owner should not have an NGO entry
-    assert_eq!(client.try_get_ngo(&new_owner), Err(Ok(Error::NotRegistered)));
+    assert_eq!(
+        client.try_get_ngo(&new_owner),
+        Err(Ok(Error::NotRegistered))
+    );
     assert!(!client.is_verified(&new_owner));
 }
 
@@ -2933,28 +2948,34 @@ fn unverified_ngo_owner_transfer_keeps_unverified_status() {
     let (env, client, _admin) = setup();
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     // Register but DO NOT verify the NGO
     client.register(&old_owner, &String::from_str(&env, "Pending NGO"));
-    
+
     // Verify the NGO is NOT verified before transfer
     assert!(!client.is_verified(&old_owner));
     let ngo_before = client.get_ngo(&old_owner);
     assert!(!ngo_before.verified);
-    
+
     // Propose and accept owner transfer (features not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
     // client.accept_ngo_owner(&new_owner);
-    
+
     // After acceptance:
     // 1. The new owner should have the NGO with unverified status preserved
     let new_ngo = client.get_ngo(&new_owner);
     assert_eq!(new_ngo.owner, new_owner);
-    assert!(!new_ngo.verified, "unverified status must be preserved after owner transfer");
+    assert!(
+        !new_ngo.verified,
+        "unverified status must be preserved after owner transfer"
+    );
     assert!(!client.is_verified(&new_owner));
-    
+
     // 2. The old owner should no longer have an NGO entry
-    assert_eq!(client.try_get_ngo(&old_owner), Err(Ok(Error::NotRegistered)));
+    assert_eq!(
+        client.try_get_ngo(&old_owner),
+        Err(Ok(Error::NotRegistered))
+    );
 }
 
 #[test]
@@ -2963,28 +2984,40 @@ fn ngo_owner_transfer_preserves_all_ngo_metadata() {
     let (env, client, admin) = setup();
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     // Register, verify, and set metadata for an NGO
-    client.register(&old_owner, &String::from_str(&env, "International Red Cross"));
+    client.register(
+        &old_owner,
+        &String::from_str(&env, "International Red Cross"),
+    );
     client.approve_ngo(&admin, &old_owner);
     client.set_metadata_uri(
         &old_owner,
-        &Some(String::from_str(&env, "https://redcross.org/logo.png"))
+        &Some(String::from_str(&env, "https://redcross.org/logo.png")),
     );
-    
+
     let ngo_before = client.get_ngo(&old_owner);
-    
+
     // Propose and accept owner transfer (features not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
     // client.accept_ngo_owner(&new_owner);
-    
+
     // After acceptance, all metadata should be preserved on the new owner
     let new_ngo = client.get_ngo(&new_owner);
     assert_eq!(new_ngo.owner, new_owner);
     assert_eq!(new_ngo.name, ngo_before.name, "name must be preserved");
-    assert_eq!(new_ngo.verified, ngo_before.verified, "verified flag must be preserved");
-    assert_eq!(new_ngo.metadata_uri, ngo_before.metadata_uri, "metadata_uri must be preserved");
-    assert_eq!(new_ngo.verified_until, ngo_before.verified_until, "verified_until must be preserved");
+    assert_eq!(
+        new_ngo.verified, ngo_before.verified,
+        "verified flag must be preserved"
+    );
+    assert_eq!(
+        new_ngo.metadata_uri, ngo_before.metadata_uri,
+        "metadata_uri must be preserved"
+    );
+    assert_eq!(
+        new_ngo.verified_until, ngo_before.verified_until,
+        "verified_until must be preserved"
+    );
 }
 
 #[test]
@@ -2994,11 +3027,11 @@ fn ngo_owner_transfer_requires_old_owner_auth() {
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
     let attacker = Address::generate(&env);
-    
+
     // Register and verify an NGO
     client.register(&old_owner, &String::from_str(&env, "Red Cross"));
     client.approve_ngo(&admin, &old_owner);
-    
+
     // Attempt to propose owner transfer without proper auth (feature not yet implemented)
     env.mock_auths(&[MockAuth {
         address: &attacker,
@@ -3009,11 +3042,11 @@ fn ngo_owner_transfer_requires_old_owner_auth() {
             sub_invokes: &[],
         },
     }]);
-    
+
     // This should fail - only the old owner can initiate transfer
     // let result = client.try_propose_ngo_owner(&old_owner, &new_owner);
     // assert!(result.is_err());
-    
+
     // The NGO should remain unchanged
     let ngo = client.get_ngo(&old_owner);
     assert_eq!(ngo.owner, old_owner);
@@ -3027,14 +3060,14 @@ fn ngo_owner_transfer_requires_new_owner_auth_to_accept() {
     let old_owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
     let attacker = Address::generate(&env);
-    
+
     // Register and verify an NGO
     client.register(&old_owner, &String::from_str(&env, "Red Cross"));
     client.approve_ngo(&admin, &old_owner);
-    
+
     // Propose owner transfer (feature not yet implemented)
     // client.propose_ngo_owner(&old_owner, &new_owner);
-    
+
     // Attempt to accept with wrong auth (feature not yet implemented)
     env.mock_auths(&[MockAuth {
         address: &attacker,
@@ -3045,11 +3078,11 @@ fn ngo_owner_transfer_requires_new_owner_auth_to_accept() {
             sub_invokes: &[],
         },
     }]);
-    
+
     // This should fail - only the new owner can accept
     // let result = client.try_accept_ngo_owner(&new_owner);
     // assert!(result.is_err());
-    
+
     // The NGO should remain with the old owner
     let ngo = client.get_ngo(&old_owner);
     assert_eq!(ngo.owner, old_owner);
