@@ -3585,3 +3585,249 @@ fn ownership_transfer_updates_index_correctly() {
     assert!(owners.contains(&new_owner));
     assert!(!owners.contains(&old_owner));
 }
+
+#[test]
+fn register_bumps_instance_and_ngo_ttl_roles() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    age_past_thresholds(&env, &client, &owner);
+
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    assert_ttls_bumped(&env, &client, &owner);
+}
+
+#[test]
+fn categories_defaults_to_zero_after_registration() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    assert_eq!(client.categories(&owner), 0);
+    assert_eq!(client.get_ngo(&owner).categories, 0);
+}
+
+#[test]
+fn categories_returns_zero_for_unregistered_address() {
+    let (env, client, _admin) = setup();
+    let stranger = Address::generate(&env);
+
+    // Never panics or errors — just returns 0.
+    assert_eq!(client.categories(&stranger), 0);
+}
+
+#[test]
+fn set_categories_stores_value_and_emits_event() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    let mask = CATEGORY_HEALTH | CATEGORY_EDUCATION;
+    client.set_categories(&owner, &mask);
+
+    assert_eq!(client.categories(&owner), mask);
+    assert_eq!(client.get_ngo(&owner).categories, mask);
+
+    assert_eq!(
+        env.events().all(),
+        soroban_sdk::vec![
+            &env,
+            (
+                client.address.clone(),
+                (symbol_short!("catset"), owner.clone()).into_val(&env),
+                mask.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn set_categories_to_zero_clears_all_tags() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    client.set_categories(&owner, &CATEGORY_ENVIRONMENT);
+    assert_eq!(client.categories(&owner), CATEGORY_ENVIRONMENT);
+
+    client.set_categories(&owner, &0);
+    assert_eq!(client.categories(&owner), 0);
+}
+
+#[test]
+fn set_categories_no_event_when_value_unchanged() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    let mask = CATEGORY_HUMANITAR | CATEGORY_ANIMALS;
+    client.set_categories(&owner, &mask);
+
+    // Setting the same mask again must write nothing and emit nothing.
+    client.set_categories(&owner, &mask);
+
+    assert_eq!(env.events().all().events().len(), 0);
+    assert_eq!(client.categories(&owner), mask);
+}
+
+#[test]
+fn set_categories_accepts_every_defined_bit() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    client.set_categories(&owner, &VALID_CATEGORY_MASK);
+    assert_eq!(client.categories(&owner), VALID_CATEGORY_MASK);
+}
+
+#[test]
+fn set_categories_rejects_reserved_bits() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    // Bit 8 is reserved.
+    let with_reserved = CATEGORY_HEALTH | (1u32 << 8);
+    assert_eq!(
+        client.try_set_categories(&owner, &with_reserved),
+        Err(Ok(Error::InvalidCategories))
+    );
+    // No change.
+    assert_eq!(client.categories(&owner), 0);
+}
+
+#[test]
+fn set_categories_rejects_high_reserved_bit() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    let high_bit = 1u32 << 31;
+    assert_eq!(
+        client.try_set_categories(&owner, &high_bit),
+        Err(Ok(Error::InvalidCategories))
+    );
+    assert_eq!(client.categories(&owner), 0);
+}
+
+#[test]
+fn set_categories_locked_after_verification() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+
+    assert_eq!(
+        client.try_set_categories(&owner, &CATEGORY_ARTS),
+        Err(Ok(Error::AlreadyVerified))
+    );
+    // Categories stay at the pre-approval value (0).
+    assert_eq!(client.categories(&owner), 0);
+}
+
+#[test]
+fn set_categories_allowed_again_after_revocation() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    // Set before approval.
+    client.set_categories(&owner, &CATEGORY_HEALTH);
+    client.approve_ngo(&admin, &owner);
+
+    // Locked — cannot change while verified.
+    assert_eq!(
+        client.try_set_categories(&owner, &CATEGORY_EDUCATION),
+        Err(Ok(Error::AlreadyVerified))
+    );
+
+    // After revocation the owner can update categories again.
+    client.revoke_ngo(&admin, &owner);
+    client.set_categories(&owner, &CATEGORY_EDUCATION);
+    assert_eq!(client.categories(&owner), CATEGORY_EDUCATION);
+}
+
+#[test]
+fn set_categories_for_unregistered_ngo_fails() {
+    let (env, client, _admin) = setup();
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.try_set_categories(&stranger, &CATEGORY_COMMUNITY),
+        Err(Ok(Error::NotRegistered))
+    );
+}
+
+#[test]
+fn set_categories_requires_owner_auth() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    client.set_categories(&owner, &CATEGORY_RESEARCH);
+
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    let (address, invocation) = &auths[0];
+    assert_eq!(address, &owner);
+    match &invocation.function {
+        AuthorizedFunction::Contract((contract, function, _)) => {
+            assert_eq!(contract, &client.address);
+            assert_eq!(function, &Symbol::new(&env, "set_categories"));
+        }
+        _ => panic!("expected a contract invocation"),
+    }
+}
+
+#[test]
+fn set_categories_bumps_instance_and_ngo_ttl() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    age_past_thresholds(&env, &client, &owner);
+
+    client.set_categories(&owner, &CATEGORY_HEALTH);
+
+    assert_ttls_bumped(&env, &client, &owner);
+}
+
+#[test]
+fn get_ngo_includes_categories() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    let name = String::from_str(&env, "Red Cross");
+    client.register(&owner, &name);
+    let mask = CATEGORY_HEALTH | CATEGORY_HUMANITAR;
+    client.set_categories(&owner, &mask);
+
+    assert_eq!(
+        client.get_ngo(&owner),
+        Ngo {
+            owner: owner.clone(),
+            name,
+            verified: false,
+            metadata_uri: None,
+            verified_until: None,
+            categories: mask,
+        }
+    );
+}
+
+#[test]
+fn set_categories_can_be_updated_multiple_times_before_verification() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    client.set_categories(&owner, &CATEGORY_HEALTH);
+    assert_eq!(client.categories(&owner), CATEGORY_HEALTH);
+
+    client.set_categories(&owner, &(CATEGORY_HEALTH | CATEGORY_EDUCATION));
+    assert_eq!(
+        client.categories(&owner),
+        CATEGORY_HEALTH | CATEGORY_EDUCATION
+    );
+
+    client.set_categories(&owner, &CATEGORY_ENVIRONMENT);
+    assert_eq!(client.categories(&owner), CATEGORY_ENVIRONMENT);
+}
