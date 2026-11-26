@@ -154,5 +154,6 @@ for what works while the vault is paused, and the
 | `ngo_count` | Anyone | View. |
 | `verified_count` | Anyone | View. |
 | `verify_period` | Anyone | View. |
+| `verification_status` | Anyone | View. |
 
 <!-- roles:ngo-registry:end -->
