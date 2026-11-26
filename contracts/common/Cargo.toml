@@ -8,3 +8,6 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
+
+[lints]
+workspace = true

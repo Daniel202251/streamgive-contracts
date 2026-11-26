@@ -6,9 +6,10 @@
 //! cancellation, top-up, rate modification, transfer, and an admin-gated
 //! emergency rescue path.
 #![no_std]
+#![allow(missing_docs)]
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token,
-    Address, Bytes, BytesN, Env, IntoVal, Map, String, Vec,
+    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
+    symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String, Vec,
 };
 
 use common::{
@@ -224,8 +225,6 @@ pub struct MaxRateClearedEvent {
     pub data: (),
 }
 
-/// Event emitted when the minimum stream duration is configured.
-
 /// Event emitted when the maximum deposit per stream is configured.
 #[contractevent(topics = ["maxdep"], data_format = "single-value")]
 #[allow(missing_docs)]
@@ -239,6 +238,8 @@ pub struct MaxDepositPerStreamSetEvent {
 pub struct MaxDepositPerStreamClearedEvent {
     pub data: (),
 }
+
+/// Event emitted when the minimum stream duration is configured.
 #[contractevent(topics = ["mindur"], data_format = "single-value")]
 #[allow(missing_docs)]
 pub struct MinDurationSetEvent {
@@ -368,10 +369,7 @@ pub struct PendingUpgrade {
     pub executable_at: u64,
 }
 
-pub mod events;
 mod math;
-pub mod storage;
-pub mod types;
 
 /// Mirrors ngo-registry's `Ngo` record for cross-contract calls. Declared
 /// locally rather than imported from the `ngo-registry` crate: depending on
@@ -389,6 +387,16 @@ pub struct NgoRecord {
     pub verified: bool,
     pub metadata_uri: Option<String>,
     pub verified_until: Option<u64>,
+}
+
+/// Thin cross-contract interface onto the configured ngo-registry contract.
+/// Only the one method `create_stream` needs. See `NgoRecord` for why this
+/// isn't just imported from the `ngo-registry` crate.
+#[contractclient(name = "NgoRegistryClient")]
+#[allow(dead_code)]
+trait NgoRegistryInterface {
+    fn get_ngo(env: Env, owner: Address) -> NgoRecord;
+    fn ngo_count(env: Env) -> u64;
 }
 
 /// A single donor -> NGO streaming donation.
@@ -753,6 +761,11 @@ pub enum Error {
     /// `pause_stream` was called on a stream whose balance is zero but that is
     /// neither cancelled, drained nor paused, so there is nothing to pause.
     StreamEmpty = 44,
+    /// `set_registry` was given an address that does not answer the
+    /// registry's `ngo_count` probe: a plain account, the vault itself, or
+    /// an unrelated contract. Storing it would make every registry check
+    /// fail closed until the admin noticed and cleared it. See issue #403.
+    InvalidRegistry = 45,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -2988,7 +3001,7 @@ impl DonationVault {
     ///
     /// ```rust,no_run
     /// # use soroban_sdk::{testutils::Address as _, Address, Env};
-    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # use donation_vault::{DonationVault, DonationVaultArgs, DonationVaultClient};
     /// # let env = Env::default();
     /// # env.mock_all_auths();
     /// # let contract_id = env.register(DonationVault, DonationVaultArgs::__constructor(&Address::generate(&env)));
@@ -3079,6 +3092,11 @@ impl DonationVault {
     /// Sets the NGO registry contract used to verify NGOs before a stream
     /// is opened. Admin-gated.
     ///
+    /// The candidate is probed with `ngo_count` before being stored, so a
+    /// plain account, the vault itself, or an unrelated contract is rejected
+    /// with `Error::InvalidRegistry` and the previous registry is left
+    /// untouched.
+    ///
     /// To clear an existing registry, use `clear_registry`.
     ///
     /// # Examples
@@ -3099,6 +3117,16 @@ impl DonationVault {
     pub fn set_registry(env: Env, registry: Address) -> Result<(), Error> {
         require_admin(&env)?;
         let previous_registry = env.storage().instance().get(&DataKey::Registry);
+
+        // Probe the candidate with a harmless registry read before storing
+        // it. A plain account, the vault itself, or an unrelated contract
+        // does not answer `ngo_count`, so it is rejected here instead of
+        // being stored and failing every NGO verification afterwards.
+        NgoRegistryClient::new(&env, &registry)
+            .try_ngo_count()
+            .map_err(|_| Error::InvalidRegistry)?
+            .map_err(|_| Error::InvalidRegistry)?;
+
         env.storage().instance().set(&DataKey::Registry, &registry);
         extend_instance_ttl(&env);
 
@@ -3620,6 +3648,11 @@ impl DonationVault {
         // The accrued amount is leaving the vault, so it no longer counts
         // against the token's committed balance (issue #346).
         add_committed(&env, &stream.token, -accrued)?;
+
+        // Keep the lifetime outflow totals in step with the payout, matching
+        // the shared settle path used by the other entry points.
+        let fee = compute_fee(&env, &stream.token, accrued);
+        record_outflow_totals(&env, accrued, fee)?;
 
         let token_client = token::Client::new(&env, &stream.token);
         let payout = payout_destination(&env, &stream.ngo);

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Shared constants used by the StreamGive contracts.
 #![no_std]
 
 /// Approximate ledgers per day at a 5-second close time. Used to express

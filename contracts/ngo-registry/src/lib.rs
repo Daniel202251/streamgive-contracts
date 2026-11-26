@@ -5,6 +5,7 @@
 //! (NGOs). Admins and approvers can approve, reject, revoke, and renew entries;
 //! the registry is queried by the donation-vault contract before a stream is opened.
 #![no_std]
+#![allow(missing_docs)]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
     Env, String, Vec,
@@ -2593,7 +2594,11 @@ impl NgoRegistry {
     /// transfer, and the new owner must accept it via `accept_owner_transfer`.
     /// The verified status is preserved through the transfer. Owner-gated; emits
     /// an `ownprop` event.
-    pub fn propose_owner_transfer(env: Env, current_owner: Address, new_owner: Address) -> Result<(), Error> {
+    pub fn propose_owner_transfer(
+        env: Env,
+        current_owner: Address,
+        new_owner: Address,
+    ) -> Result<(), Error> {
         current_owner.require_auth();
 
         if current_owner == new_owner {
@@ -2626,7 +2631,11 @@ impl NgoRegistry {
     /// call this to complete the transfer. The NGO entry is moved to be keyed by
     /// the new owner's address, and the verified status is preserved. Emits an
     /// `ownaccpt` event.
-    pub fn accept_owner_transfer(env: Env, old_owner: Address, new_owner: Address) -> Result<(), Error> {
+    pub fn accept_owner_transfer(
+        env: Env,
+        old_owner: Address,
+        new_owner: Address,
+    ) -> Result<(), Error> {
         new_owner.require_auth();
 
         let old_key = DataKey::Ngo(old_owner.clone());
@@ -2720,11 +2729,7 @@ impl NgoRegistry {
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &owner);
 
-        OwnershipCancelledEvent {
-            owner,
-            data: (),
-        }
-        .publish(&env);
+        OwnershipCancelledEvent { owner, data: () }.publish(&env);
 
         Ok(())
     }

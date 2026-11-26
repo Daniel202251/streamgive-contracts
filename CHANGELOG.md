@@ -28,6 +28,10 @@ This project does not yet follow a formal versioning scheme — each contract's
   several streams in one transaction, with one authorization and one refund
   per stream. Rejects foreign or already-cancelled streams and is
   all-or-nothing. Adds `Error::NotStreamOwner` (code 40).
+- `donation-vault`: `set_registry` now probes the candidate with `ngo_count`
+  and rejects addresses that are not an NGO registry with the new append-only
+  `Error::InvalidRegistry` (code 45), leaving the previously configured
+  registry in place (#406).
 - `donation-vault`: contract skeleton with stream storage schema.
 - `donation-vault`: `create_stream`, `withdraw`, `withdraw_batch`,
   `cancel_stream`, `rescue_stream`, `top_up`, `modify_rate`, and

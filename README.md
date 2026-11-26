@@ -360,6 +360,7 @@ currently allocated up to code 41. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 39 | `StreamTooShort` | A stream's deposit would deplete in fewer seconds than the admin-configured `min_duration`. Distinct from `InvalidAmount`, which only covers zero or negative amounts. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `modify_rate` |
 | 43 | `StreamDrained` | `pause_stream` called on a stream that already paid out in full (status `Drained`). It was not cancelled. | `pause_stream` |
 | 44 | `StreamEmpty` | `pause_stream` called on a stream whose balance is zero but that is neither cancelled, drained nor paused. | `pause_stream` |
+| 45 | `InvalidRegistry` | `set_registry` was given an address that does not answer the registry's `ngo_count` probe: a plain account, the vault itself, or an unrelated contract. | `set_registry` |
 
 ### `ngo-registry`
 

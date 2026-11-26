@@ -55,6 +55,8 @@ for what works while the vault is paused, and the
 | `set_max_streams_per_donor` | Admin | |
 | `set_max_rate` | Admin | |
 | `clear_max_rate` | Admin | |
+| `set_max_deposit_per_stream` | Admin | |
+| `clear_max_deposit_per_stream` | Admin | |
 | `set_min_duration` | Admin | |
 | `set_registry` | Admin | |
 | `clear_registry` | Admin | |
@@ -109,6 +111,7 @@ for what works while the vault is paused, and the
 | `cancel_grace_ledgers` | Anyone | View. |
 | `max_streams_per_donor` | Anyone | View. |
 | `max_rate` | Anyone | View. |
+| `max_deposit_per_stream` | Anyone | View. |
 | `min_duration` | Anyone | View. |
 | `registry` | Anyone | View. |
 | `payout_address` | Anyone | View. |
@@ -138,6 +141,10 @@ for what works while the vault is paused, and the
 | `pause_registrations` | Admin | Prevents `register` from accepting new applications. |
 | `resume_registrations` | Admin | Re-opens `register` after a pause. |
 | `upgrade` | Admin | |
+| `set_upgrade_delay` | Admin | |
+| `propose_upgrade` | Admin | |
+| `execute_upgrade` | Admin | After `upgrade_delay` has passed. |
+| `cancel_upgrade` | Admin | |
 | `approve_ngo` | Approver | The `approver` argument signs. |
 | `batch_approve` | Approver | The `approver` argument signs. |
 | `reject_ngo` | Approver | The `approver` argument signs. Unverified entries only. |

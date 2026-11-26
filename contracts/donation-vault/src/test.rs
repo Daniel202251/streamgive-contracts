@@ -5237,6 +5237,45 @@ fn committed_balance_tracks_deposits_and_accrued_withdrawals() {
 }
 
 #[test]
+fn set_registry_rejects_unrelated_contract_and_preserves_existing() {
+    let (s, _registry) = setup_with_registry();
+    let existing = s.client.registry().unwrap();
+
+    // The token is a deployed contract, but it is not an NGO registry and
+    // does not answer `ngo_count`.
+    let result = s.client.try_set_registry(&s.token.address);
+
+    assert_eq!(result, Err(Ok(Error::InvalidRegistry)));
+    assert_eq!(s.client.registry(), Some(existing.clone()));
+    assert_eq!(s.client.get_config().registry, Some(existing));
+}
+
+#[test]
+fn set_registry_rejects_plain_account_and_preserves_existing() {
+    let (s, _registry) = setup_with_registry();
+    let existing = s.client.registry().unwrap();
+
+    let account = Address::generate(&s.env);
+    let result = s.client.try_set_registry(&account);
+
+    assert_eq!(result, Err(Ok(Error::InvalidRegistry)));
+    assert_eq!(s.client.registry(), Some(existing.clone()));
+    assert_eq!(s.client.get_config().registry, Some(existing));
+}
+
+#[test]
+fn set_registry_rejects_the_vault_itself_and_preserves_existing() {
+    let (s, _registry) = setup_with_registry();
+    let existing = s.client.registry().unwrap();
+
+    let result = s.client.try_set_registry(&s.client.address);
+
+    assert_eq!(result, Err(Ok(Error::InvalidRegistry)));
+    assert_eq!(s.client.registry(), Some(existing.clone()));
+    assert_eq!(s.client.get_config().registry, Some(existing));
+}
+
+#[test]
 fn committed_balance_tracks_top_ups() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_500);
