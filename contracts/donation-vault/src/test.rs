@@ -3935,30 +3935,6 @@ fn status_is_queryable_after_cancel_then_further_operations_fail() {
     assert!(result.is_err()); // nothing left to withdraw
 }
 
-/// Asserts that the `n`-th most recently published event (0 = the last one)
-/// has the given topics and data, regardless of which contract emitted it ├óΓé¼ΓÇ¥
-/// vault entry points publish their own events last, after any token
-/// transfer. Lets a test pin the order of the several events a single call
-/// may emit (issue #344). Compared as XDR because `Val` has no `PartialEq`.
-fn assert_nth_last_event<T: IntoVal<Env, Val>, D: IntoVal<Env, Val>>(
-    env: &Env,
-    n: u32,
-    topics: T,
-    data: D,
-) {
-    let all = env.events().all();
-    let events = all.events();
-    let event = &events[events.len() - 1 - n as usize];
-    let ContractEventBody::V0(body) = &event.body;
-    let expected_topics = ScVal::try_from_val(env, &topics.into_val(env)).unwrap();
-    let expected_data = ScVal::try_from_val(env, &data.into_val(env)).unwrap();
-    assert_eq!(
-        ScVal::Vec(Some(ScVec(body.topics.clone()))),
-        expected_topics
-    );
-    assert_eq!(body.data, expected_data);
-}
-
 #[test]
 fn preview_stream_reports_duration_and_token_fee_without_mutating_state() {
     let s = setup();
