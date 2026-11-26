@@ -74,6 +74,7 @@ for what works while the vault is paused, and the
 | `pause_stream` | Donor | The stream's donor. |
 | `resume_stream` | Donor | The stream's donor. |
 | `cancel_stream` | Donor | The stream's donor. Works while the vault is paused. |
+| `cancel_streams` | Donor | Every listed stream must belong to the same donor, which signs once. All-or-nothing. Works while the vault is paused. |
 | `withdraw` | NGO | The stream's NGO. |
 | `withdraw_batch` | NGO | All streams must share one NGO, which signs. |
 | `withdraw_all` | NGO | The `ngo` argument signs, once the page contains a stream. An empty page needs no signature and moves nothing. |
@@ -139,6 +140,7 @@ for what works while the vault is paused, and the
 | `unregister` | NGO | The `owner` argument signs. Unverified entries only. |
 | `update_name` | NGO | The `owner` argument signs. Unverified entries only. |
 | `set_metadata_uri` | NGO | The `owner` argument signs. |
+| `set_categories` | NGO | The `owner` argument signs. Unverified entries only. |
 | `touch_ngo` | Anyone | TTL bump only. |
 | `admin` | Anyone | View. |
 | `pending_admin` | Anyone | View. |
@@ -148,10 +150,12 @@ for what works while the vault is paused, and the
 | `list_ngos` | Anyone | View. |
 | `list_ngos_page` | Anyone | View. |
 | `metadata_uri` | Anyone | View. |
+| `categories` | Anyone | View. |
 | `get_ngo` | Anyone | View. |
 | `is_verified` | Anyone | View. |
 | `ngo_count` | Anyone | View. |
 | `verified_count` | Anyone | View. |
 | `verify_period` | Anyone | View. |
+| `verification_status` | Anyone | View. |
 
 <!-- roles:ngo-registry:end -->
