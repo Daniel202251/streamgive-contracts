@@ -361,4 +361,43 @@ mod test {
         assert_eq!(seconds_to_deplete(2, i128::MAX), None);
         assert_eq!(seconds_to_deplete(1, u64::MAX as i128), Some(u64::MAX));
     }
+
+    /// Pins the worked examples in `docs/STREAM_LIFECYCLE.md` ("Choosing a
+    /// rate"): a monthly amount of a 7-decimal token converted to a per-second
+    /// rate over a 30-day month, rounded down. If this fails, update the doc's
+    /// tables along with the math.
+    #[test]
+    fn monthly_rate_worked_examples_match_the_docs() {
+        const UNIT: i128 = 10_000_000; // one whole token, 7 decimals
+        const MONTH: u64 = 30 * 86_400; // 2,592,000 seconds
+
+        // (monthly tokens, rate, paid per 30 days, seconds to drain one month's amount)
+        let examples: [(i128, i128, i128, u64); 3] = [
+            (10, 38, 98_496_000, 2_631_579),
+            (100, 385, 997_920_000, 2_597_403),
+            (1_000, 3_858, 9_999_936_000, 2_592_017),
+        ];
+        for (monthly, rate, paid, drain) in examples {
+            let units = monthly * UNIT;
+            assert_eq!(units / MONTH as i128, rate);
+            assert_eq!(accrued(rate, MONTH, units), paid);
+            assert_eq!(seconds_to_deplete(rate, units), Some(drain));
+            // The final, partial second pays exactly what is left.
+            assert_eq!(accrued(rate, drain, units), units);
+            assert!(accrued(rate, drain - 1, units) < units);
+        }
+
+        // Rounding up instead: overpays and drains early.
+        assert_eq!(accrued(39, MONTH, 100_000_000), 101_088_000);
+        assert_eq!(seconds_to_deplete(39, 100_000_000), Some(2_564_103));
+
+        // Sizing a 12-month deposit both ways.
+        assert_eq!(38 * MONTH as i128 * 12, 1_181_952_000);
+        assert_eq!(seconds_to_deplete(38, 1_181_952_000), Some(31_104_000));
+        assert_eq!(seconds_to_deplete(38, 1_200_000_000), Some(31_578_948));
+
+        // Below 2,592,000 units a month the rate rounds to zero.
+        assert_eq!(2_591_999 / MONTH as i128, 0);
+        assert_eq!(2_592_000 / MONTH as i128, 1);
+    }
 }

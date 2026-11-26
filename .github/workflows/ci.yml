@@ -8,10 +8,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     name: Build, test, lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +29,19 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories, licenses, bans and sources
+        run: cargo deny check
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: "./scripts"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -44,3 +62,40 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Hash and upload wasm artifacts
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cd target/wasm32v1-none/release
+          sha256sum ./*.wasm | tee wasm.sha256
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat wasm.sha256 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload wasm artifacts
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-wasm
+          path: |
+            target/wasm32v1-none/release/*.wasm
+            target/wasm32v1-none/release/wasm.sha256
+
+  docs-check:
+    name: Check docs links and spelling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@v1
+        with:
+          args: --no-progress "**/*.md"
+
+      - name: Check spelling
+        uses: streetsidesoftware/cspell-action@v6
+        with:
+          config: .cspell.json
+          files: "**/*.md"
