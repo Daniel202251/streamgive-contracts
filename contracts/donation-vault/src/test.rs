@@ -5608,6 +5608,443 @@ fn create_stream_fails_for_unregistered_ngo() {
 }
 
 #[test]
+fn get_config_snapshot_every_setter() {
+    let s = setup();
+
+    // Snapshot 1: Default config after init
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: None,
+            fee_bps: 0,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 2: After set_treasury
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 0,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 3: After set_fee_bps
+    s.client.set_fee_bps(&500);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 0,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 4: After set_min_deposit
+    s.client.set_min_deposit(&100);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 100,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 5: After set_max_streams_per_donor
+    s.client.set_max_streams_per_donor(&50);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: None,
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 6: After set_max_rate
+    s.client.set_max_rate(&1_000);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 0,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 7: After set_min_duration
+    s.client.set_min_duration(&60);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: None,
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 8: After set_registry
+    let registry = Address::generate(&s.env);
+    s.client.set_registry(&registry);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 0,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 9: After set_cancel_grace_ledgers
+    s.client.set_cancel_grace_ledgers(&10);
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 10: After pause
+    s.client.pause();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: true,
+            treasury: Some(treasury.clone()),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry.clone()),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 11: After unpause
+    s.client.unpause();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: Some(treasury),
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: Some(registry),
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: false,
+        }
+    );
+
+    // Snapshot 12: After propose_admin
+    let candidate = Address::generate(&s.env);
+    s.client.propose_admin(&candidate);
+    assert_eq!(
+        s.client.get_config().pending_admin,
+        Some(candidate.clone())
+    );
+
+    // Snapshot 13: After cancel_admin_proposal
+    s.client.cancel_admin_proposal();
+    assert_eq!(s.client.get_config().pending_admin, None);
+
+    // Propose again for the final snapshot
+    s.client.propose_admin(&candidate);
+
+    // Snapshot 14: After renounce_admin (pending_admin cleared, renounced = true)
+    s.client.renounce_admin();
+    assert_eq!(
+        s.client.get_config(),
+        Config {
+            paused: false,
+            treasury: None,
+            fee_bps: 500,
+            min_deposit: 100,
+            max_streams_per_donor: 50,
+            max_rate: Some(1_000),
+            min_duration: 60,
+            registry: None,
+            cancel_grace_ledgers: 10,
+            total_donated: 0,
+            total_withdrawn: 0,
+            total_fees_collected: 0,
+            pending_admin: None,
+            renounced: true,
+        }
+    );
+}
+
+#[test]
+#[ignore] // TODO: Requires custom mock token that can fail on specific transfer call
+fn withdraw_batch_is_atomic_on_token_transfer_failure() {
+    // This test verifies that withdraw_batch is atomic: if any token transfer
+    // fails, the entire transaction must revert and leave all streams unchanged.
+    //
+    // Test scenario:
+    // 1. Create 3 streams with accrued amounts
+    // 2. Use a mock token that fails on the 2nd transfer
+    // 3. Call withdraw_batch on all 3 streams
+    // 4. Verify that the call fails
+    // 5. Verify that NO stream's last_update or withdrawn was changed
+    // 6. Verify that NO tokens were transferred
+    //
+    // Implementation note: This requires a custom token contract that can be
+    // configured to fail on a specific transfer call. The Soroban SDK's
+    // built-in token doesn't support this, so this test is marked as ignored
+    // until proper mock infrastructure is available.
+    
+    let s = setup();
+    s.token_admin.mint(&s.donor, &3_000);
+    
+    // Create 3 streams
+    let stream1 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let stream2 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let stream3 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    
+    // Let some time pass so all streams accrue
+    s.env.ledger().with_mut(|l| l.timestamp += 50);
+    
+    // Record state before batch withdrawal
+    let stream1_before = s.client.get_stream(&stream1);
+    let stream2_before = s.client.get_stream(&stream2);
+    let stream3_before = s.client.get_stream(&stream3);
+    let ngo_balance_before = s.token.balance(&s.ngo);
+    let vault_balance_before = s.token.balance(&s.client.address);
+    
+    // TODO: Replace with failing mock token
+    // let failing_token = create_failing_token(&s.env, 2); // Fails on 2nd transfer
+    
+    // Try to withdraw all 3 streams - should fail and revert
+    let mut ids = Vec::new(&s.env);
+    ids.push_back(stream1);
+    ids.push_back(stream2);
+    ids.push_back(stream3);
+    
+    // TODO: This should fail when using failing token
+    // let result = s.client.try_withdraw_batch(&ids);
+    // assert!(result.is_err());
+    
+    // Verify atomicity: NO streams should have changed
+    let stream1_after = s.client.get_stream(&stream1);
+    let stream2_after = s.client.get_stream(&stream2);
+    let stream3_after = s.client.get_stream(&stream3);
+    
+    assert_eq!(stream1_before.last_update, stream1_after.last_update);
+    assert_eq!(stream1_before.withdrawn, stream1_after.withdrawn);
+    assert_eq!(stream2_before.last_update, stream2_after.last_update);
+    assert_eq!(stream2_before.withdrawn, stream2_after.withdrawn);
+    assert_eq!(stream3_before.last_update, stream3_after.last_update);
+    assert_eq!(stream3_before.withdrawn, stream3_after.withdrawn);
+    
+    // Verify NO tokens were transferred
+    assert_eq!(s.token.balance(&s.ngo), ngo_balance_before);
+    assert_eq!(s.token.balance(&s.client.address), vault_balance_before);
+}
+
+#[test]
+fn withdraw_batch_at_max_size_stays_within_resource_budget() {
+    let s = setup();
+    
+    // Create exactly MAX_BATCH_WITHDRAW_STREAMS (20) streams
+    let balance_per_stream: i128 = 1_000;
+    let total_balance = balance_per_stream * MAX_BATCH_WITHDRAW_STREAMS as i128;
+    s.token_admin.mint(&s.donor, &total_balance);
+    
+    let mut stream_ids = Vec::new(&s.env);
+    for _ in 0..MAX_BATCH_WITHDRAW_STREAMS {
+        let stream_id = s.client.create_stream(
+            &s.donor,
+            &s.ngo,
+            &s.token.address,
+            &balance_per_stream,
+            &10,
+        );
+        stream_ids.push_back(stream_id);
+    }
+    
+    // Advance time so all streams have accrued funds
+    s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 per stream
+    
+    // Reset and enforce budget for the withdraw_batch call
+    // Soroban's default budget (without enforced limits):
+    // - CPU instructions: 100M instructions
+    // - Memory: 40MB footprint
+    //
+    // Safety margin: withdraw_batch at max capacity (20 streams) should use:
+    // - Less than 50M CPU instructions (50% of budget)
+    // - Less than 20MB memory footprint (50% of budget)
+    //
+    // These margins ensure that:
+    // 1. Future optimizations won't break existing usage
+    // 2. Network protocol changes have room to adjust limits
+    // 3. Contract upgrades with minor logic additions stay safe
+    s.env.budget().reset_unlimited();
+    
+    // Execute the batch withdrawal with enforced budget
+    let amounts = s.client.withdraw_batch(&stream_ids);
+    
+    // Verify the operation succeeded
+    assert_eq!(amounts.len(), MAX_BATCH_WITHDRAW_STREAMS as u32);
+    for i in 0..MAX_BATCH_WITHDRAW_STREAMS {
+        assert_eq!(amounts.get(i as u32), Some(500));
+    }
+    
+    // Check resource usage
+    let cpu_insns = s.env.budget().cpu_instruction_cost();
+    let mem_bytes = s.env.budget().memory_bytes_cost();
+    
+    // Document current usage for future reference
+    // If these assertions fail, it means withdraw_batch resource usage has increased
+    // and MAX_BATCH_WITHDRAW_STREAMS may need to be reduced, or the implementation
+    // needs optimization.
+    //
+    // CPU budget margin: 50M instructions (50% of 100M default)
+    const MAX_CPU_INSTRUCTIONS: u64 = 50_000_000;
+    // Memory budget margin: 20MB (50% of 40MB default)
+    const MAX_MEMORY_BYTES: u64 = 20_000_000;
+    
+    assert!(
+        cpu_insns < MAX_CPU_INSTRUCTIONS,
+        "withdraw_batch CPU usage ({} instructions) exceeds safe margin ({} instructions). \
+         This may cause on-chain failures. Consider optimizing or reducing MAX_BATCH_WITHDRAW_STREAMS.",
+        cpu_insns,
+        MAX_CPU_INSTRUCTIONS
+    );
+    
+    assert!(
+        mem_bytes < MAX_MEMORY_BYTES,
+        "withdraw_batch memory usage ({} bytes) exceeds safe margin ({} bytes). \
+         This may cause on-chain failures. Consider optimizing or reducing MAX_BATCH_WITHDRAW_STREAMS.",
+        mem_bytes,
+        MAX_MEMORY_BYTES
+    );
+    
+    // Log actual usage for visibility in test output
+    println!(
+        "withdraw_batch resource usage for {} streams: CPU={} instructions, Memory={} bytes",
+        MAX_BATCH_WITHDRAW_STREAMS, cpu_insns, mem_bytes
+    );
+}
+
+#[test]
 fn create_stream_fails_for_revoked_ngo() {
     let (s, registry) = setup_with_registry();
     s.token_admin.mint(&s.donor, &1_000);
@@ -8007,441 +8444,4 @@ mod proptest_committed_balance {
             }
         }
     }
-}
-
-#[test]
-fn get_config_snapshot_every_setter() {
-    let s = setup();
-
-    // Snapshot 1: Default config after init
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: None,
-            fee_bps: 0,
-            min_deposit: 0,
-            max_streams_per_donor: 100,
-            max_rate: None,
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 2: After set_treasury
-    let treasury = Address::generate(&s.env);
-    s.client.set_treasury(&treasury);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 0,
-            min_deposit: 0,
-            max_streams_per_donor: 100,
-            max_rate: None,
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 3: After set_fee_bps
-    s.client.set_fee_bps(&500);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 0,
-            max_streams_per_donor: 100,
-            max_rate: None,
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 4: After set_min_deposit
-    s.client.set_min_deposit(&100);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 100,
-            max_rate: None,
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 5: After set_max_streams_per_donor
-    s.client.set_max_streams_per_donor(&50);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: None,
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 6: After set_max_rate
-    s.client.set_max_rate(&1_000);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 0,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 7: After set_min_duration
-    s.client.set_min_duration(&60);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: None,
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 8: After set_registry
-    let registry = Address::generate(&s.env);
-    s.client.set_registry(&registry);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: Some(registry.clone()),
-            cancel_grace_ledgers: 0,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 9: After set_cancel_grace_ledgers
-    s.client.set_cancel_grace_ledgers(&10);
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: Some(registry.clone()),
-            cancel_grace_ledgers: 10,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 10: After pause
-    s.client.pause();
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: true,
-            treasury: Some(treasury.clone()),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: Some(registry.clone()),
-            cancel_grace_ledgers: 10,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 11: After unpause
-    s.client.unpause();
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: Some(treasury),
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: Some(registry),
-            cancel_grace_ledgers: 10,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: false,
-        }
-    );
-
-    // Snapshot 12: After propose_admin
-    let candidate = Address::generate(&s.env);
-    s.client.propose_admin(&candidate);
-    assert_eq!(
-        s.client.get_config().pending_admin,
-        Some(candidate.clone())
-    );
-
-    // Snapshot 13: After cancel_admin_proposal
-    s.client.cancel_admin_proposal();
-    assert_eq!(s.client.get_config().pending_admin, None);
-
-    // Propose again for the final snapshot
-    s.client.propose_admin(&candidate);
-
-    // Snapshot 14: After renounce_admin (pending_admin cleared, renounced = true)
-    s.client.renounce_admin();
-    assert_eq!(
-        s.client.get_config(),
-        Config {
-            paused: false,
-            treasury: None,
-            fee_bps: 500,
-            min_deposit: 100,
-            max_streams_per_donor: 50,
-            max_rate: Some(1_000),
-            min_duration: 60,
-            registry: None,
-            cancel_grace_ledgers: 10,
-            total_donated: 0,
-            total_withdrawn: 0,
-            total_fees_collected: 0,
-            pending_admin: None,
-            renounced: true,
-        }
-    );
-}
-
-#[test]
-#[ignore] // TODO: Requires custom mock token that can fail on specific transfer call
-fn withdraw_batch_is_atomic_on_token_transfer_failure() {
-    // This test verifies that withdraw_batch is atomic: if any token transfer
-    // fails, the entire transaction must revert and leave all streams unchanged.
-    //
-    // Test scenario:
-    // 1. Create 3 streams with accrued amounts
-    // 2. Use a mock token that fails on the 2nd transfer
-    // 3. Call withdraw_batch on all 3 streams
-    // 4. Verify that the call fails
-    // 5. Verify that NO stream's last_update or withdrawn was changed
-    // 6. Verify that NO tokens were transferred
-    //
-    // Implementation note: This requires a custom token contract that can be
-    // configured to fail on a specific transfer call. The Soroban SDK's
-    // built-in token doesn't support this, so this test is marked as ignored
-    // until proper mock infrastructure is available.
-    
-    let s = setup();
-    s.token_admin.mint(&s.donor, &3_000);
-    
-    // Create 3 streams
-    let stream1 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    let stream2 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    let stream3 = s.client.create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    
-    // Let some time pass so all streams accrue
-    s.env.ledger().with_mut(|l| l.timestamp += 50);
-    
-    // Record state before batch withdrawal
-    let stream1_before = s.client.get_stream(&stream1);
-    let stream2_before = s.client.get_stream(&stream2);
-    let stream3_before = s.client.get_stream(&stream3);
-    let ngo_balance_before = s.token.balance(&s.ngo);
-    let vault_balance_before = s.token.balance(&s.client.address);
-    
-    // TODO: Replace with failing mock token
-    // let failing_token = create_failing_token(&s.env, 2); // Fails on 2nd transfer
-    
-    // Try to withdraw all 3 streams - should fail and revert
-    let mut ids = Vec::new(&s.env);
-    ids.push_back(stream1);
-    ids.push_back(stream2);
-    ids.push_back(stream3);
-    
-    // TODO: This should fail when using failing token
-    // let result = s.client.try_withdraw_batch(&ids);
-    // assert!(result.is_err());
-    
-    // Verify atomicity: NO streams should have changed
-    let stream1_after = s.client.get_stream(&stream1);
-    let stream2_after = s.client.get_stream(&stream2);
-    let stream3_after = s.client.get_stream(&stream3);
-    
-    assert_eq!(stream1_before.last_update, stream1_after.last_update);
-    assert_eq!(stream1_before.withdrawn, stream1_after.withdrawn);
-    assert_eq!(stream2_before.last_update, stream2_after.last_update);
-    assert_eq!(stream2_before.withdrawn, stream2_after.withdrawn);
-    assert_eq!(stream3_before.last_update, stream3_after.last_update);
-    assert_eq!(stream3_before.withdrawn, stream3_after.withdrawn);
-    
-    // Verify NO tokens were transferred
-    assert_eq!(s.token.balance(&s.ngo), ngo_balance_before);
-    assert_eq!(s.token.balance(&s.client.address), vault_balance_before);
-}
-
-#[test]
-fn withdraw_batch_at_max_size_stays_within_resource_budget() {
-    let s = setup();
-    
-    // Create exactly MAX_BATCH_WITHDRAW_STREAMS (20) streams
-    let balance_per_stream: i128 = 1_000;
-    let total_balance = balance_per_stream * MAX_BATCH_WITHDRAW_STREAMS as i128;
-    s.token_admin.mint(&s.donor, &total_balance);
-    
-    let mut stream_ids = Vec::new(&s.env);
-    for _ in 0..MAX_BATCH_WITHDRAW_STREAMS {
-        let stream_id = s.client.create_stream(
-            &s.donor,
-            &s.ngo,
-            &s.token.address,
-            &balance_per_stream,
-            &10,
-        );
-        stream_ids.push_back(stream_id);
-    }
-    
-    // Advance time so all streams have accrued funds
-    s.env.ledger().with_mut(|l| l.timestamp += 50); // 500 per stream
-    
-    // Reset and enforce budget for the withdraw_batch call
-    // Soroban's default budget (without enforced limits):
-    // - CPU instructions: 100M instructions
-    // - Memory: 40MB footprint
-    //
-    // Safety margin: withdraw_batch at max capacity (20 streams) should use:
-    // - Less than 50M CPU instructions (50% of budget)
-    // - Less than 20MB memory footprint (50% of budget)
-    //
-    // These margins ensure that:
-    // 1. Future optimizations won't break existing usage
-    // 2. Network protocol changes have room to adjust limits
-    // 3. Contract upgrades with minor logic additions stay safe
-    s.env.budget().reset_unlimited();
-    
-    // Execute the batch withdrawal with enforced budget
-    let amounts = s.client.withdraw_batch(&stream_ids);
-    
-    // Verify the operation succeeded
-    assert_eq!(amounts.len(), MAX_BATCH_WITHDRAW_STREAMS as u32);
-    for i in 0..MAX_BATCH_WITHDRAW_STREAMS {
-        assert_eq!(amounts.get(i as u32), Some(500));
-    }
-    
-    // Check resource usage
-    let cpu_insns = s.env.budget().cpu_instruction_cost();
-    let mem_bytes = s.env.budget().memory_bytes_cost();
-    
-    // Document current usage for future reference
-    // If these assertions fail, it means withdraw_batch resource usage has increased
-    // and MAX_BATCH_WITHDRAW_STREAMS may need to be reduced, or the implementation
-    // needs optimization.
-    //
-    // CPU budget margin: 50M instructions (50% of 100M default)
-    const MAX_CPU_INSTRUCTIONS: u64 = 50_000_000;
-    // Memory budget margin: 20MB (50% of 40MB default)
-    const MAX_MEMORY_BYTES: u64 = 20_000_000;
-    
-    assert!(
-        cpu_insns < MAX_CPU_INSTRUCTIONS,
-        "withdraw_batch CPU usage ({} instructions) exceeds safe margin ({} instructions). \
-         This may cause on-chain failures. Consider optimizing or reducing MAX_BATCH_WITHDRAW_STREAMS.",
-        cpu_insns,
-        MAX_CPU_INSTRUCTIONS
-    );
-    
-    assert!(
-        mem_bytes < MAX_MEMORY_BYTES,
-        "withdraw_batch memory usage ({} bytes) exceeds safe margin ({} bytes). \
-         This may cause on-chain failures. Consider optimizing or reducing MAX_BATCH_WITHDRAW_STREAMS.",
-        mem_bytes,
-        MAX_MEMORY_BYTES
-    );
-    
-    // Log actual usage for visibility in test output
-    println!(
-        "withdraw_batch resource usage for {} streams: CPU={} instructions, Memory={} bytes",
-        MAX_BATCH_WITHDRAW_STREAMS, cpu_insns, mem_bytes
-    );
 }
