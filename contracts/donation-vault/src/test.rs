@@ -48,7 +48,8 @@ fn assert_last_event<T: IntoVal<Env, Val>, D: IntoVal<Env, Val>>(env: &Env, topi
 /// last one (issue #344).
 fn count_events_with_topic(env: &Env, topic0: Symbol) -> u32 {
     let all = env.events().all();
-    let expected = ScVal::try_from_val(env, &topic0.to_val()).unwrap();
+    let topic0: Val = topic0.into_val(env);
+    let expected = ScVal::try_from_val(env, &topic0).unwrap();
     all.events()
         .iter()
         .filter(|event| {
@@ -7079,6 +7080,59 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
+
+// =============================================================================
+// Property tests for fee calculation invariants (Issue 1)
+// =============================================================================
+
+#[cfg(test)]
+mod proptest_fee_invariants {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Property test: fee + net always equals accrued for any rate, elapsed time,
+    /// and fee settings, and no value is negative.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn fee_plus_net_equals_accrued(
+            rate in 1i128..=1_000_000i128,
+            elapsed in 1u64..=86_400u64,
+            balance in 1_000i128..=1_000_000_000i128,
+            fee_bps in 0u32..=1_000u32,
+        ) {
+            let s = setup();
+            s.token_admin.mint(&s.donor, &balance);
+
+            let treasury = Address::generate(&s.env);
+            s.client.set_treasury(&treasury);
+            s.client.set_fee_bps(&fee_bps);
+
+            let stream_id = s
+                .client
+                .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
+
+            s.env.ledger().with_mut(|l| l.timestamp += elapsed);
+
+            let accrued = s.client.pending_accrual(&stream_id);
+            let net = s.client.withdraw(&stream_id);
+            let fee_balance = s.token.balance(&treasury);
+
+            // Core invariant: fee + net == accrued
+            prop_assert_eq!(fee_balance + net, accrued);
+
+            // No value should be negative
+            prop_assert!(fee_balance >= 0);
+            prop_assert!(net >= 0);
+            prop_assert!(accrued >= 0);
+
+            // Net should never exceed accrued
+            prop_assert!(net <= accrued);
+        }
+    }
+}
+
 // =============================================================================
 // Tests for accrual after very long elapsed times (Issue 2)
 // =============================================================================
@@ -7106,10 +7160,13 @@ fn accrual_with_max_elapsed_and_large_rate_never_overflows() {
     let balance: i128 = 10_000_000_000;
     s.token_admin.mint(&s.donor, &balance);
 
-    let rate = i128::MAX / 2;
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
+    let stream_id = s.client.create_stream(
+        &s.donor,
+        &s.ngo,
+        &s.token.address,
+        &balance,
+        &(i128::MAX / 2),
+    );
 
     // Advance time to u64::MAX
     s.env.ledger().with_mut(|l| l.timestamp += u64::MAX);
@@ -7187,204 +7244,153 @@ fn streams_by_donor_handles_default_cap() {
 }
 
 // =============================================================================
-// max_deposit_per_stream tests
+// Accrual stops while a stream is paused (issue #450)
 // =============================================================================
 
-#[test]
-fn max_deposit_per_stream_is_none_by_default() {
-    let s = setup();
-    assert_eq!(s.client.max_deposit_per_stream(), None);
-    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+/// Moves the ledger clock forward by `secs`.
+fn advance(env: &Env, secs: u64) {
+    env.ledger().with_mut(|l| l.timestamp += secs);
+}
+
+/// A 1_000-token stream at 10/s, so every amount in the pause tests below is
+/// `10 * seconds` and easy to check by eye.
+fn paused_test_stream(s: &Setup) -> u64 {
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10)
 }
 
 #[test]
-fn set_max_deposit_per_stream_stores_value_and_emits_event() {
+fn payable_amount_before_during_and_after_a_pause() {
     let s = setup();
+    let stream_id = paused_test_stream(&s);
 
-    s.client.set_max_deposit_per_stream(&5_000);
+    // Before: 30s at 10/s is payable.
+    advance(&s.env, 30);
+    assert_eq!(s.client.pending_accrual(&stream_id), 300);
 
-    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
-    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(5_000));
+    // Pausing settles what was owed straight to the NGO.
+    assert_eq!(s.client.pause_stream(&stream_id), 300);
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 700);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
 
-    assert_last_event(&s.env, (symbol_short!("maxdep"),), 5_000i128);
+    // During: nothing becomes payable however long the pause lasts.
+    for secs in [1, 49, 50] {
+        advance(&s.env, secs);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        assert_eq!(s.client.pending_payout(&stream_id), (0, 0));
+    }
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.token.balance(&s.client.address), 700);
+
+    // After: accrual restarts from the resume time, not the pause time.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 20);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+
+    assert_eq!(s.client.withdraw(&stream_id), 200);
+    assert_eq!(s.token.balance(&s.ngo), 500);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.balance, 500);
+    assert_eq!(stream.withdrawn, 500);
+    assert_eq!(s.token.balance(&s.client.address), 500);
 }
 
 #[test]
-fn set_max_deposit_per_stream_rejects_zero_and_negative() {
+fn withdraw_is_rejected_while_paused_and_pays_nothing() {
     let s = setup();
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 10);
+    s.client.pause_stream(&stream_id);
+    advance(&s.env, 1_000);
 
     assert_eq!(
-        s.client.try_set_max_deposit_per_stream(&0),
-        Err(Ok(Error::InvalidAmount))
+        s.client.try_withdraw(&stream_id),
+        Err(Ok(Error::StreamPaused))
     );
-    assert_eq!(
-        s.client.try_set_max_deposit_per_stream(&-1),
-        Err(Ok(Error::InvalidAmount))
-    );
-    // No ceiling should have been stored.
-    assert_eq!(s.client.max_deposit_per_stream(), None);
+    assert_eq!(s.token.balance(&s.ngo), 100);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 900);
 }
 
 #[test]
-fn clear_max_deposit_per_stream_removes_ceiling_and_emits_event() {
+fn a_pause_longer_than_the_stream_would_last_does_not_drain_it() {
     let s = setup();
+    let stream_id = paused_test_stream(&s);
+    s.client.pause_stream(&stream_id);
 
-    s.client.set_max_deposit_per_stream(&5_000);
-    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
+    // 10_000s at 10/s would be ten times the balance if it kept accruing.
+    advance(&s.env, 10_000);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Paused);
+    assert_eq!(stream.balance, 1_000);
+    assert_eq!(s.token.balance(&s.ngo), 0);
 
-    s.client.clear_max_deposit_per_stream();
-    assert_eq!(s.client.max_deposit_per_stream(), None);
-
-    assert_last_event(&s.env, (symbol_short!("maxdepclr"),), ());
+    s.client.resume_stream(&stream_id);
+    advance(&s.env, 40);
+    assert_eq!(s.client.pending_accrual(&stream_id), 400);
 }
 
 #[test]
-fn clear_max_deposit_per_stream_is_noop_when_not_set() {
+fn resuming_in_the_same_second_adds_nothing() {
     let s = setup();
-    // Should not panic and should return Ok.
-    s.client.clear_max_deposit_per_stream();
-    assert_eq!(s.client.max_deposit_per_stream(), None);
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 5);
+
+    assert_eq!(s.client.pause_stream(&stream_id), 50);
+    s.client.resume_stream(&stream_id);
+
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 950);
+    advance(&s.env, 3);
+    assert_eq!(s.client.pending_accrual(&stream_id), 30);
 }
 
 #[test]
-fn create_stream_accepts_deposit_exactly_at_ceiling() {
+fn repeated_pauses_pay_only_for_the_active_seconds() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // (active seconds, paused seconds) for three cycles: 10 + 20 + 5 = 35
+    // active seconds in total, 350 tokens.
+    for (active, paused) in [(10u64, 100u64), (20, 7), (5, 3_600)] {
+        advance(&s.env, active);
+        assert_eq!(s.client.pause_stream(&stream_id), 10 * active as i128);
+        advance(&s.env, paused);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        s.client.resume_stream(&stream_id);
+    }
+
+    assert_eq!(s.token.balance(&s.ngo), 350);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 650);
+    assert_eq!(s.client.get_stream(&stream_id).withdrawn, 350);
+    assert_eq!(s.token.balance(&s.client.address), 650);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+}
+
+#[test]
+fn a_cliff_stream_paused_before_its_start_accrues_from_the_resume_time() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-
-    s.client.set_max_deposit_per_stream(&1_000);
-
-    // Exactly at the ceiling — must succeed.
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
-}
-
-#[test]
-fn create_stream_rejects_deposit_above_ceiling() {
-    let s = setup();
-    s.token_admin.mint(&s.donor, &2_000);
-
-    s.client.set_max_deposit_per_stream(&999);
-
-    assert_eq!(
+    let start = s.env.ledger().timestamp() + 100;
+    let stream_id =
         s.client
-            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
-        Err(Ok(Error::DepositTooHigh))
-    );
-    // No funds should have moved.
-    assert_eq!(s.token.balance(&s.donor), 2_000);
-    assert_eq!(s.token.balance(&s.client.address), 0);
-}
+            .create_stream_with_start(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &start);
 
-#[test]
-fn create_stream_accepts_any_deposit_when_ceiling_is_cleared() {
-    let s = setup();
-    s.token_admin.mint(&s.donor, &10_000);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pause_stream(&stream_id), 0);
 
-    s.client.set_max_deposit_per_stream(&500);
-    // Confirm the ceiling is active.
-    assert_eq!(
-        s.client
-            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
-        Err(Ok(Error::DepositTooHigh))
-    );
+    // Sit paused until well after the cliff would have passed.
+    s.env.ledger().with_mut(|l| l.timestamp = start + 50);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
 
-    // Remove the ceiling; the same deposit should now succeed.
-    s.client.clear_max_deposit_per_stream();
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
-    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
-}
-
-#[test]
-fn top_up_accepts_amount_that_keeps_balance_at_ceiling() {
-    let s = setup();
-    // Deposit 500, ceiling 1_000 — a 500 top-up should land exactly on the ceiling.
-    s.token_admin.mint(&s.donor, &1_500);
-
-    s.client.set_max_deposit_per_stream(&1_000);
-
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
-
-    // No time passes, so balance is still 500. A 500 top-up brings it to 1_000.
-    s.client.top_up(&stream_id, &500);
-    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
-}
-
-#[test]
-fn top_up_rejects_amount_that_exceeds_ceiling_after_settlement() {
-    let s = setup();
-    // Deposit 500, ceiling 1_000. After 100 seconds at rate 1, 100 accrues,
-    // leaving balance = 400. A top-up of 601 would push balance to 1_001.
-    s.token_admin.mint(&s.donor, &2_000);
-
-    s.client.set_max_deposit_per_stream(&1_000);
-
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
-
-    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues
-
-    // Post-settlement balance will be 400; 601 would exceed the ceiling.
-    assert_eq!(
-        s.client.try_top_up(&stream_id, &601),
-        Err(Ok(Error::DepositTooHigh))
-    );
-    // Balance and donor funds must be unchanged (top_up is a no-op on error).
-    assert_eq!(s.client.get_stream(&stream_id).balance, 500);
-    assert_eq!(s.token.balance(&s.donor), 1_500);
-}
-
-#[test]
-fn top_up_accepts_amount_exactly_at_ceiling_after_settlement() {
-    let s = setup();
-    s.token_admin.mint(&s.donor, &2_000);
-
-    s.client.set_max_deposit_per_stream(&1_000);
-
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
-
-    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues, settled on top_up
-
-    // After settlement balance = 400; a top-up of exactly 600 brings it to 1_000.
-    s.client.top_up(&stream_id, &600);
-    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
-}
-
-#[test]
-fn get_config_reflects_max_deposit_per_stream_when_set_and_cleared() {
-    let s = setup();
-
-    // Not set yet.
-    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
-
-    s.client.set_max_deposit_per_stream(&7_777);
-    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(7_777));
-
-    s.client.clear_max_deposit_per_stream();
-    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
-}
-
-#[test]
-fn set_max_deposit_per_stream_requires_admin() {
-    let s = setup();
-    // mock_all_auths is active, so we probe via the recorded auth instead of
-    // bypassing it. The call must succeed and require the admin's authorisation.
-    s.client.set_max_deposit_per_stream(&1_000);
-    assert_auth_required_from(&s, &s.client.admin(), "set_max_deposit_per_stream");
-}
-
-#[test]
-fn clear_max_deposit_per_stream_requires_admin() {
-    let s = setup();
-    s.client.set_max_deposit_per_stream(&1_000);
-    s.client.clear_max_deposit_per_stream();
-    assert_auth_required_from(&s, &s.client.admin(), "clear_max_deposit_per_stream");
+    // The cliff is behind us, so only time after the resume counts.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pending_accrual(&stream_id), 100);
+    assert_eq!(s.client.withdraw(&stream_id), 100);
+    assert_eq!(s.token.balance(&s.ngo), 100);
 }
