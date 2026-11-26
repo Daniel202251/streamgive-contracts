@@ -376,6 +376,8 @@ pub struct NgoRecord {
     pub name: String,
     /// Whether the NGO has been verified in the registry.
     pub verified: bool,
+    pub metadata_uri: Option<String>,
+    pub verified_until: Option<u64>,
 }
 
 /// A single donor -> NGO streaming donation.
