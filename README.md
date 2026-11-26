@@ -313,7 +313,7 @@ the numeric code below (e.g. a failed `try_withdraw` surfacing `Error(5)`).
 ### `donation-vault`
 
 Codes are append-only and never renumbered; the `donation-vault` enum is
-currently allocated up to code 40. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
+currently allocated up to code 41. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POLICY.md). "Admin-gated" entry points first call
 `require_admin`, so they can also return `NotInitialized` (no admin) or
 `AdminRenounced`.
 
@@ -333,7 +333,7 @@ currently allocated up to code 40. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 12 | `AlreadyPaused` | `pause` called while already paused. | `pause` |
 | 13 | `AlreadyUnpaused` | `unpause` called while already active. | `unpause` |
 | 14 | `DepositTooLow` | Deposit is below the configured `min_deposit`. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo` |
-| 15 | `StreamCancelled` | The stream was already closed out by `cancel_stream`/`rescue_stream`. | `top_up`, `modify_rate`, `transfer_stream`, `cancel_streams`, `rescue_stream` |
+| 15 | `StreamCancelled` | The stream was already closed out by `cancel_stream`/`rescue_stream`. | `pause_stream`, `resume_stream`, `top_up`, `modify_rate`, `transfer_stream`, `rescue_stream` |
 | 16 | `InvalidAdmin` | The proposed admin equals the current admin. | `propose_admin` |
 | 17 | `StreamLimitExceeded` | Donor reached `max_streams_per_donor`. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo` |
 | 18 | `NgoNotVerified` | A configured registry has no verified entry for the NGO. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `top_up`, `transfer_stream`, `modify_rate` (rate increases only) |
@@ -358,7 +358,8 @@ currently allocated up to code 40. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 37 | `NoTreasury` | `sweep_surplus` was called before a treasury was configured, so the surplus has nowhere to go. | `sweep_surplus` |
 | 38 | `SweepExceedsSurplus` | `sweep_surplus` or `sweep_surplus_to` was asked to move more than the surplus above the token's committed balance, which would dip into stream funds. | `sweep_surplus`, `sweep_surplus_to` |
 | 39 | `StreamTooShort` | A stream's deposit would deplete in fewer seconds than the admin-configured `min_duration`. Distinct from `InvalidAmount`, which only covers zero or negative amounts. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `modify_rate` |
-| 40 | `NotStreamOwner` | `cancel_streams` was given a stream belonging to a different donor; the batch is rejected in full. | `cancel_streams` |
+| 43 | `StreamDrained` | `pause_stream` called on a stream that already paid out in full (status `Drained`). It was not cancelled. | `pause_stream` |
+| 44 | `StreamEmpty` | `pause_stream` called on a stream whose balance is zero but that is neither cancelled, drained nor paused. | `pause_stream` |
 
 ### `ngo-registry`
 

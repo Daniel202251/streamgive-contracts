@@ -2002,6 +2002,100 @@ fn top_up_rejects_non_positive_amount() {
 }
 
 #[test]
+fn pause_stream_on_a_drained_stream_returns_stream_drained() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // Let it run to completion and pay everything out.
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    assert_eq!(s.client.withdraw(&stream_id), 1_000);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Drained);
+    assert!(!stream.cancelled);
+
+    assert_eq!(
+        s.client.try_pause_stream(&stream_id),
+        Err(Ok(Error::StreamDrained))
+    );
+    // Still drained, and nothing moved.
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
+    );
+    assert_eq!(s.token.balance(&s.ngo), 1_000);
+}
+
+#[test]
+fn pause_stream_twice_on_a_stream_it_drained_returns_stream_drained() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+
+    // The first pause settles the whole balance, which drains the stream.
+    assert_eq!(s.client.pause_stream(&stream_id), 1_000);
+    assert_eq!(
+        s.client.try_pause_stream(&stream_id),
+        Err(Ok(Error::StreamDrained))
+    );
+}
+
+#[test]
+fn pause_stream_on_an_empty_stream_returns_stream_empty() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // An Active stream with a zero balance cannot be reached through the entry
+    // points (they mark it Drained), so write the record directly.
+    s.env.as_contract(&s.client.address, || {
+        let key = DataKey::Stream(stream_id);
+        let mut stream: Stream = s.env.storage().persistent().get(&key).unwrap();
+        stream.balance = 0;
+        s.env.storage().persistent().set(&key, &stream);
+    });
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Active);
+    assert!(!stream.cancelled);
+
+    assert_eq!(
+        s.client.try_pause_stream(&stream_id),
+        Err(Ok(Error::StreamEmpty))
+    );
+}
+
+#[test]
+fn pause_stream_on_a_cancelled_stream_still_returns_stream_cancelled() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    s.client.cancel_stream(&stream_id);
+
+    assert_eq!(
+        s.client.try_pause_stream(&stream_id),
+        Err(Ok(Error::StreamCancelled))
+    );
+}
+
+#[test]
+fn pause_stream_error_codes_are_distinct_and_append_only() {
+    // Clients tell the cases apart by number, so these must never change.
+    assert_eq!(Error::StreamCancelled as u32, 15);
+    assert_eq!(Error::StreamAlreadyPaused as u32, 32);
+    assert_eq!(Error::StreamDrained as u32, 43);
+    assert_eq!(Error::StreamEmpty as u32, 44);
+}
+
+#[test]
 fn top_up_on_cancelled_stream_fails() {
     let s = setup();
     s.token_admin.mint(&s.donor, &2_000);

@@ -733,6 +733,12 @@ pub enum Error {
     /// `sweep_surplus` or `sweep_surplus_to` named the vault itself as the
     /// destination, which would move nothing.
     InvalidSweepDestination = 42,
+    /// `pause_stream` was called on a stream that ran to completion
+    /// (`Drained`). It was not cancelled: it paid out in full.
+    StreamDrained = 43,
+    /// `pause_stream` was called on a stream whose balance is zero but that is
+    /// neither cancelled, drained nor paused, so there is nothing to pause.
+    StreamEmpty = 44,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -3302,6 +3308,10 @@ impl DonationVault {
 
     /// Pauses a stream after settling all accrued funds. The balance and rate
     /// are retained, while the stream no longer accrues until resumed.
+    ///
+    /// Fails with `StreamCancelled` for a cancelled stream, `StreamAlreadyPaused`
+    /// for a paused one, `StreamDrained` for one that already paid out in full,
+    /// and `StreamEmpty` for one with a zero balance that is none of those.
     pub fn pause_stream(env: Env, stream_id: u64) -> Result<i128, Error> {
         require_not_paused(&env)?;
         let key = DataKey::Stream(stream_id);
@@ -3319,10 +3329,10 @@ impl DonationVault {
             return Err(Error::StreamAlreadyPaused);
         }
         if stream.status == StreamStatus::Drained {
-            return Err(Error::StreamCancelled);
+            return Err(Error::StreamDrained);
         }
         if stream.balance == 0 {
-            return Err(Error::StreamCancelled);
+            return Err(Error::StreamEmpty);
         }
 
         let now = env.ledger().timestamp();
