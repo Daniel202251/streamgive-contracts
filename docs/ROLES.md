@@ -60,6 +60,7 @@ for what works while the vault is paused, and the
 | `clear_registry` | Admin | |
 | `rescue_stream` | Admin | Only while the vault is paused. |
 | `sweep_surplus` | Admin | Sends to the configured treasury. |
+| `sweep_surplus_to` | Admin | Sends to an explicit destination; no treasury needed. |
 | `upgrade` | Admin | Only while `upgrade_delay` is zero. |
 | `set_upgrade_delay` | Admin | |
 | `propose_upgrade` | Admin | |
@@ -89,6 +90,7 @@ for what works while the vault is paused, and the
 | `get_streams` | Anyone | View. |
 | `streams_by_donor` | Anyone | View. |
 | `streams_by_ngo` | Anyone | View. |
+| `active_streams_by_ngo` | Anyone | View. Pages only `Active` and `Paused` streams. |
 | `stream_count` | Anyone | View. |
 | `pending_accrual` | Anyone | View. |
 | `depletion_time` | Anyone | View. |
@@ -142,6 +144,7 @@ for what works while the vault is paused, and the
 | `unregister` | NGO | The `owner` argument signs. Unverified entries only. |
 | `update_name` | NGO | The `owner` argument signs. Unverified entries only. |
 | `set_metadata_uri` | NGO | The `owner` argument signs. |
+| `set_categories` | NGO | The `owner` argument signs. Unverified entries only. |
 | `touch_ngo` | Anyone | TTL bump only. |
 | `admin` | Anyone | View. |
 | `pending_admin` | Anyone | View. |
@@ -151,6 +154,7 @@ for what works while the vault is paused, and the
 | `list_ngos` | Anyone | View. |
 | `list_ngos_page` | Anyone | View. |
 | `metadata_uri` | Anyone | View. |
+| `categories` | Anyone | View. |
 | `get_ngo` | Anyone | View. |
 | `is_verified` | Anyone | View. |
 | `ngo_count` | Anyone | View. |
