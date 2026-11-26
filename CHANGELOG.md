@@ -10,6 +10,14 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ## [Unreleased]
 
+### Changed
+
+- `donation-vault`: split `lib.rs` into `events.rs`, `types.rs`, and `storage.rs` modules. No behaviour change. See issue #393.
+
+### Added
+
+- `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
+
 ### Added
 
 - `donation-vault`: `set_registry` now probes the candidate with `ngo_count`
