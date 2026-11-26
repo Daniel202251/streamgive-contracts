@@ -1,0 +1,21 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "Soroban",
+    "stellar",
+    "wasm",
+    "ngo",
+    "StreamGive",
+    "clippy",
+    "rustfmt",
+    "stroops",
+    "cargo",
+    "testnet",
+    "mainnet",
+    "clawback",
+    "machete"
+  ],
+  "ignoreRegExpList": ["```[\\s\\S]*?```", "`[^`\\n]+`"],
+  "ignorePaths": ["target/**", "node_modules/**"]
+}

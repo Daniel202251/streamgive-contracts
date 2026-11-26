@@ -10,8 +10,27 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ## [Unreleased]
 
+### Changed
+
+- `donation-vault`: split `lib.rs` into `events.rs`, `types.rs`, and `storage.rs` modules. No behaviour change. See issue #393.
+
 ### Added
 
+- `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
+
+### Added
+
+- `donation-vault`, `ngo-registry`: configure `[workspace.lints]` with
+  `rustc::missing_docs = warn` and `clippy::all = warn`; opt both contract
+  crates in via `[lints] workspace = true`. Add crate-level doc comments and
+  document all previously undocumented public items; annotate self-evident
+  `#[contractevent]` fields with `#[allow(missing_docs)]` to avoid boilerplate
+  prose.
+
+- `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
+  several streams in one transaction, with one authorization and one refund
+  per stream. Rejects foreign or already-cancelled streams and is
+  all-or-nothing. Adds `Error::NotStreamOwner` (code 40).
 - `donation-vault`: contract skeleton with stream storage schema.
 - `donation-vault`: `create_stream`, `withdraw`, `withdraw_batch`,
   `cancel_stream`, `rescue_stream`, `top_up`, `modify_rate`, and
@@ -49,91 +68,212 @@ This project does not yet follow a formal versioning scheme — each contract's
   `pending_accrual`, `pending_payout`, `depletion_time`, `get_config`, and
   `allowed_tokens`.
 - `donation-vault`: admin-configurable `cancel_grace_ledgers` retention for
-  cancelled streams (`set_cancel_grace_ledgers` / `cancel_grace_ledgers`,
-  emitting `grceset`), with TTL coverage for indexing after cancellation.
-- `donation-vault`: two-step admin transfer (`propose_admin`, `accept_admin`,
-  `cancel_admin_proposal`, `pending_admin`), self-proposal rejection
-  (`Error::InvalidAdmin`), and permanent `renounce_admin` (emitting
-  `renounce`).
-- `donation-vault`, `ngo-registry`: `__constructor` for atomic
-  deployment-time admin initialization in both contracts, emitting `init`.
-- `donation-vault`, `ngo-registry`: admin-gated in-place `upgrade` entry
-  points emitting `upgrade`, with unit test coverage verifying authorization
-  and state preservation.
-- `donation-vault`, `ngo-registry`: typed events for all admin configuration
-  and lifecycle changes (`init`, `upgrade`, `treasset`, `treclr`, `feeset`,
-  `tokfeeset`, `tokfeeclr`, `mindep`, `grceset`, `regset`, `regclr`,
-  `maxstrm`, `propadmin`, `acptadmin`, `canceladm`, `renounce`, `rescue`,
-  `transfer`; see [`docs/EVENTS.md`](docs/EVENTS.md)).
+  cancelled streams, with TTL coverage for indexing after cancellation.
+- `donation-vault`: read-only `pending_accrual` view.
+- `donation-vault`: tests that nothing accrues while a stream is paused and that
+  accrual restarts from the resume time. `pending_accrual` and `pending_payout`
+  now return zero for a paused stream, matching what `settle` pays.
 - `donation-vault`: regression coverage for one-stroop-per-second streams and
   their zero-rounded protocol fee.
 - `DataKey` enums now derive `Debug` in both contracts for clearer storage-key
   diagnostics.
 - `ngo-registry`: contract skeleton with storage types and `init`.
-- `ngo-registry`: NGO application/registration via `register`, owner-gated
-  `update_name` and `unregister` (blocked once verified with
-  `Error::AlreadyVerified`).
-- `ngo-registry`: admin-gated `approve_ngo`, `batch_approve`, `revoke_ngo`,
-  and `remove_ngo`.
-- `ngo-registry`: two-step admin transfer (`propose_admin`, `accept_admin`,
-  `cancel_admin_proposal`, `pending_admin`).
-- `ngo-registry`: read-only getters `ngo_count` (with deprecated `total_ngos`
-  alias), `is_verified`, and paginated `list_ngos` (capped at
-  `MAX_LIST_LIMIT = 50`).
-- Documentation: `SECURITY.md`, `docs/ARCHITECTURE.md`, `docs/FEES.md`,
-  `docs/STORAGE.md`, `docs/EVENTS.md`, `docs/THREAT_MODEL.md`, and README
-  sections covering release profile, pausing, storage TTLs/keep-alive entry
-  points (`extend_stream` and `touch_ngo`), error codes, and FAQ.
-- `scripts/deploy-testnet.sh` and `scripts/deploy-mainnet.sh` for building,
-  deploying, initializing, configuring, and recording both contracts (with
-  network passphrases and Wasm SHA-256 hashes) in `deployments.json`.
-- CI workflow running `cargo fmt --check`, `cargo clippy`, `cargo doc`, a
-  `wasm32v1-none` release build, Wasm binary size check, and
-  `cargo test --workspace`.
+- `ngo-registry`: NGO application/registration via `register`.
+- `ngo-registry`: admin-gated `approve_ngo`.
+- `ngo-registry`: admin-gated `revoke_ngo`.
+- `ngo-registry`: two-step admin transfer via `propose_admin` /
+  `accept_admin`.
+- `ngo-registry`: owner-gated `update_name` for fixing an application's
+  name before approval; rejected with `Error::AlreadyVerified` after.
+- `ngo-registry`: read-only `ngo_count` getter for total registered NGOs.
+- `ngo-registry`: optional owner-controlled metadata URI on an NGO entry.
+  `set_metadata_uri` (owner-auth-gated) sets or clears it, `metadata_uri`
+  reads it back, and it is included in `get_ngo`'s `Ngo`. Bounded to
+  `MAX_METADATA_URI_LEN` (512 bytes); a longer value is rejected with
+  `Error::MetadataUriTooLong` (14). Emits a `metadata` event. Unlike the
+  name, it stays editable after approval, so an NGO's website/logo reference
+  can be kept current (#347).
+- `ngo-registry`: optional verification expiry. `set_verify_period` (admin)
+  sets a period in seconds that `approve_ngo` / `batch_approve` add to the
+  current time to stamp `Ngo.verified_until`; `verify_period` reads it back.
+  `renew_ngo` (admin) moves an entry's expiry forward from now. `is_verified`
+  and `get_ngo` treat a lapsed verification as unverified, while the stored
+  flag is kept so the entry can be renewed. A `renew` event carries the new
+  expiry and a `verperiod` event the new period; renewing with no period
+  configured fails with `Error::NoVerifyPeriod` (15) (#348).
+- `donation-vault`: optional minimum stream duration. `set_min_duration` (admin)
+  sets the shortest time to depletion, in seconds, that `create_stream` and
+  `modify_rate` accept; `min_duration` reads it back and it is included in
+  `get_config`. A deposit that would drain sooner is rejected with
+  `Error::StreamTooShort` (39), distinct from `InvalidAmount`. Emits a `mindur`
+  event. Off by default (`0`) (#340).
+- `donation-vault`: `withdraw_all(ngo, start, limit)` settles an NGO's streams
+  a bounded page at a time straight from the NGO's stream index, so a caller
+  never has to list stream ids off-chain or know when it has seen them all. It
+  returns a `WithdrawAllPage { amounts, next }` — the net payout per stream in
+  page order and the cursor to pass as `start` next time; iteration is complete
+  once `next` reaches the NGO's stream count. `limit` is clamped to
+  `MAX_BATCH_WITHDRAW_STREAMS`, and a page that has accrued nothing yields one
+  `0` per stream and still advances the cursor rather than failing (#342).
+- `donation-vault`: read-only `pending_refund(stream_id)` view for donors. It
+  returns the refund a `cancel_stream` would make right now — the stream's
+  remaining balance minus what has accrued to the NGO — applying the same rules
+  as `cancel_stream` (cliff and paused streams accrue nothing). A drained or
+  already-cancelled stream reports `0`. It is the donor's mirror of
+  `pending_payout` and never moves funds (#345).
+- `donation-vault`: the `drained` event. When settling a stream empties its
+  balance and flips its status to `Drained`, the vault emits
+  `DrainedEvent { stream_id, total_paid }` — the cumulative amount paid to the
+  NGO over the stream's life. Covers `withdraw`, `withdraw_batch` (once per
+  emptied stream), and the settle-driven `modify_rate`, `transfer_stream`, and
+  `pause_stream` paths. `cancel_stream` and `top_up` settle only to reclassify
+  a stream and stay silent, so an indexer sees the terminal transition once,
+  without recomputing it from `withdraw` events (#344).
+- Contract events for registry and vault state changes (see
+  [`docs/EVENTS.md`](docs/EVENTS.md)).
+- Document storage TTL policy, inactivity expiry risks, and keep-alive entry
+  points (`extend_stream` and `touch_ngo`) in `README.md` and `docs/STORAGE.md`.
+- `scripts/deploy-testnet.sh` for deploying both contracts to testnet.
+- `scripts/deploy-mainnet.sh` for deploying to mainnet. It requires
+  `--confirm`, pins the Public network passphrase, requires an explicit
+  admin address, refuses to overwrite an existing entry, and records the
+  contract IDs under a separate `mainnet` key in `deployments.json`.
+  `deploy-testnet.sh` now preserves that key when it rewrites the file.
+- CI workflow running `cargo fmt --check`, `cargo clippy`, a
+  `wasm32v1-none` release build, and `cargo test --workspace`.
+- README FAQ covering the license, release overflow checks, `no_std`, storage
+  TTLs, and cancelled-stream retention.
+- `docs/THREAT_MODEL.md`: assets, actors and trust boundaries, security
+  invariants, and per-contract threat tables (authorization and accounting,
+  availability and storage economics, registry identity, privilege/deployment
+  and off-chain), plus a residual-risk register of open items.
+- `docs/UPGRADE_POLICY.md`: error codes are append-only, how storage-layout
+  changes are handled across an `upgrade`, and the process for announcing
+  breaking changes (#314).
+- `donation-vault`: `Error::InvalidNgo` (26) and `Error::InvalidToken` (27).
+- `donation-vault`: per-NGO payout address via `set_payout_address` /
+  `payout_address`, so an NGO can route `withdraw` / `withdraw_batch` payouts
+  to a treasury wallet while its owner key only authorises. Owner-auth-gated,
+  emits `payoutset`, and reported on the `withdraw` event.
+- `donation-vault`: optional per-second rate ceiling via `set_max_rate` /
+  `clear_max_rate` / `max_rate`. Off by default; when set, `create_stream`
+  and `modify_rate` reject rates above it with `Error::RateTooHigh` (#339).
+  Admin-gated, emits `maxrate` / `maxrtclr`, and reported by `get_config`.
+- `donation-vault`: `create_stream_with_start` for a stream that stays idle
+  behind a cliff until its `start` timestamp, so scheduled or trial-period
+  pledges don't accrue from the ledger of creation. The deposit is still
+  pulled up front; `pending_accrual` stays 0 before `start`, `depletion_time`
+  is measured from `start`, and cancelling before `start` refunds the whole
+  deposit. A `start` more than `MAX_START_DELAY_SECONDS` (one year) ahead is
+  rejected with `Error::StartTooFar` (#337).
+- `ngo-registry`: admin-managed approver list so review work can be delegated
+  without sharing the admin key. `add_approver` / `remove_approver` (admin-gated)
+  manage the list, `is_approver` / `list_approvers` expose it, and `approve_ngo`,
+  `batch_approve`, and `revoke_ngo` now accept the admin or any listed approver as
+  the acting address (`Error::NotApprover` otherwise). Adds `Error::NotApprover`
+  (12) and `Error::AlreadyApprover` (13), emits `apadd` / `aprem`, and backs the
+  new `DataKey::Approvers` instance key (#349).
+- `ngo-registry`: `reject_ngo(approver, ngo_owner, reason_code)` so a reviewer can
+  decline a pending application and tell the applicant why: it removes the entry
+  (freeing the owner to register again) and emits `rejected` carrying the opaque,
+  caller-defined `reason_code`. Like the other review entry points it is callable
+  by the admin or a listed approver (`Error::NotApprover` otherwise), and it
+  rejects an already-verified NGO with `Error::AlreadyVerified` — an approval is
+  undone with `revoke_ngo` first (#350).
+- `ngo-registry`: `list_ngos_page(start, limit)` returns a page of owner
+  addresses alongside `next`, the index to resume from, so clients can page
+  through the registry without recomputing the cursor and can tell the final
+  page from a full one. `list_ngos` is unchanged (#351).
+- `ngo-registry`: `verified_count()` getter so dashboards can read the number of
+  verified NGOs without listing the registry. The count is backed by a
+  `DataKey::VerifiedCount` instance key kept in step by every transition:
+  `approve_ngo` / `batch_approve` increment it, `revoke_ngo` decrements it, and
+  removing an entry decrements it when the entry was verified. `ngo_count` is
+  unchanged and still reports the total number of entries (#352).
+- `donation-vault`: two-step, timelocked upgrade. `set_upgrade_delay(delay)`
+  configures the warning period (admin-gated, emits `updelay`); `propose_upgrade`
+  records a pending Wasm hash plus its `executable_at` timestamp (admin-gated,
+  emits `uppropose`); `execute_upgrade` carries it out, emitting `upgrade`
+  (admin-gated, fails with `Error::NoPendingUpgrade` when nothing is proposed and
+  `Error::UpgradeDelayNotElapsed` before the delay); and `cancel_upgrade`
+  withdraws the proposal (admin-gated, emits `upcancel`, fails with
+  `Error::NoPendingUpgrade` when nothing is proposed). Read-only `upgrade_delay()`
+  and `pending_upgrade()` expose the configured delay and the pending proposal.
+  Donors holding open streams now get a warning window before the bytecode
+  changes (#343).
+- `donation-vault`: the vault now tracks a committed balance per token — the sum
+  of stream balances it holds on behalf of streams — kept in step by every
+  fund-moving path (`create_stream` / `top_up` add, `withdraw`,
+  `withdraw_batch`, `cancel_stream`, `rescue_stream`, `modify_rate`,
+  `pause_stream`, `resume_stream` and `transfer_stream` subtract). Admin-gated
+  `sweep_surplus(token, amount)` moves only the surplus above that committed
+  balance to the treasury, so tokens sent to the vault by mistake can be
+  recovered without ever touching stream funds; it emits `sweep` and fails with
+  `Error::NoTreasury` (no treasury configured) or
+  `Error::SweepExceedsSurplus` (more than the surplus). Read-only
+  `committed_balance()` and `surplus()` expose the two figures (#346).
+  Storage note: `DataKey::CommittedBalance` is a new key, so it is absent (zero)
+  on any pre-existing deployment. Upgrading a vault that already holds open
+  streams therefore requires a one-time backfill of each token's committed
+  balance (the sum of its streams' `balance`) before `sweep_surplus` is used, or
+  the whole token balance would read as sweepable surplus. No such deployment
+  exists yet, so no migration entry point is added.
 
 ### Changed
 
-- **BREAKING** `donation-vault`: `Stream` struct layout changed — added
-  `created_at: u64`, `status: StreamStatus`, and `cancelled: bool` fields.
-  Existing persistent `Stream` entries written by earlier builds cannot be
-  decoded after an in-place Wasm upgrade without migration.
-- **BREAKING** `donation-vault`, `ngo-registry`: `Error` enum variants were
-  expanded and renumbered (`donation-vault` codes `1`–`25`, `ngo-registry`
-  codes `1`–`11`). Clients and indexers matching numeric Soroban error codes
-  must update to the current enum values.
-- **BREAKING** `donation-vault`: updated event data payloads to include net,
-  fee, and settled amounts. `withdraw` now emits
-  `(accrued: i128, fee: i128, net: i128)` instead of single-value `accrued`;
-  `topup` now emits `(amount: i128, settled: i128)` instead of single-value
-  `amount`; `ratemod` now emits `(old_rate: i128, new_rate: i128, settled: i128)`
-  instead of `(old_rate, new_rate)`; and `transfer` emits
-  `(old_ngo: Address, new_ngo: Address, settled: i128)` instead of
-  `(old_ngo, new_ngo)`. Off-chain indexers and subscribers must update their
-  event decoders for these new data shapes.
-- **BREAKING** `donation-vault`: `get_config` returns an extended `Config`
-  struct that includes `min_deposit`, `max_streams_per_donor`, `registry`,
-  `cancel_grace_ledgers`, `total_donated`, `pending_admin`, and `renounced`.
-  Clients decoding the old struct shape will need updating.
-- `donation-vault`, `ngo-registry`: `init` now requires `admin.require_auth()`
-  and is superseded by `__constructor` for atomic deployment-time
-  initialization.
-- `donation-vault`: `set_fee_bps` and `set_token_fee_bps` reject non-zero
-  fees when no treasury is configured (`Error::FeeRequiresTreasury`), and
-  `clear_treasury` rejects clearing while a non-zero global fee is set.
-- `donation-vault`: `min_deposit` is enforced on `top_up` as well as
-  `create_stream`, and registry verification (`require_verified_ngo`) is
-  re-checked on `top_up` and `transfer_stream`.
+- **BREAKING** `ngo-registry`: `approve_ngo`, `batch_approve`, and `revoke_ngo`
+  now take the acting address as a leading argument
+  (`approve_ngo(approver: Address, ngo_owner: Address)`,
+  `batch_approve(approver: Address, owners: Vec<Address>)`,
+  `revoke_ngo(approver: Address, ngo_owner: Address)`) and require the caller to
+  be the admin or a listed approver. Integrators calling these entry points must
+  pass the authorising address and update their invocation arguments (#349).
+- **BREAKING** `ngo-registry`: the `Ngo` struct gains a
+  `metadata_uri: Option<String>` field, so the value returned by `get_ngo`
+  changes shape. Off-chain decoders of `Ngo` must add the new field (#347).
+- **BREAKING** `ngo-registry`: the `Ngo` struct also gains a
+  `verified_until: Option<u64>` field, so `get_ngo`'s return shape changes
+  again. Off-chain decoders of `Ngo` must add the new field. Verification is
+  now time-bounded when a period is configured, and a lapsed verification is
+  reported by `get_ngo`/`is_verified` as unverified (#348).
+- **BREAKING** `donation-vault`: the `withdraw` event data payload now includes
+  the payout destination, changing from `(accrued: i128, fee: i128, net: i128)`
+  to `(accrued: i128, fee: i128, net: i128, payout: Address)`. Off-chain
+  indexers and subscribers must update their `withdraw` event decoders.
+- **BREAKING** `donation-vault`: updated event data payloads to include net, fee,
+  and settled amounts. `withdraw` now emits `(accrued: i128, fee: i128, net: i128)`
+  instead of single-value `accrued`; `topup` now emits `(amount: i128, settled: i128)`
+  instead of single-value `amount`; `ratemod` now emits `(old_rate: i128, new_rate: i128, settled: i128)`
+  instead of `(old_rate, new_rate)`; and `transfer` emits `(old_ngo: Address, new_ngo: Address, settled: i128)`
+  instead of `(old_ngo, new_ngo)`. Off-chain indexers and subscribers must update
+  their event decoders for these new data shapes.
+- `donation-vault`: `get_config` returns an extended `Config` struct that includes
+  `min_deposit`, `max_streams_per_donor`, `registry`, `cancel_grace_ledgers`,
+  `total_donated`, `pending_admin`, and `renounced`. Clients decoding the old
+  struct shape will need updating.
+- **BREAKING** `donation-vault`: the `Config` returned by `get_config` gains a
+  `max_rate: Option<i128>` field (the per-second rate ceiling, `None` when
+  unset). Clients decoding the `Config` struct must add the new field (#339).
+- **BREAKING** `donation-vault`: the `Stream` struct gains a `start: u64` field
+  (the cliff timestamp, equal to `created_at` for a plain `create_stream`).
+  Off-chain decoders of the stored `Stream` record must add the new field
+  (#337).
+- **BREAKING** `donation-vault`: the `Stream` struct gains a `memo: Bytes`
+  field (the donor's optional tag, empty when none was supplied with
+  `create_stream`), and the `created` event data payload gains a trailing
+  `memo: Bytes`. Off-chain decoders of the stored `Stream` record and of the
+  `created` event must add the new field (#341).
 - `donation-vault`: stream `balance`/`withdrawn` updates and the stream-id
   counter use checked arithmetic, returning `Error::ArithmeticOverflow`
   instead of panicking on overflow.
-- `donation-vault`: `create_stream` and `transfer_stream` reject a stream
-  whose `donor` and `ngo` are the same address with `Error::SelfStream`, so a
-  deposit can't be counted as a committed donation while streaming straight
-  back to its donor.
-- `ngo-registry`: `register` and `update_name` validate names — rejecting
-  empty names, Unicode whitespace-only or invisible-format-only names,
-  control characters, and invalid UTF-8 (`Error::InvalidName`), as well as
-  names exceeding 200 bytes (`Error::NameTooLong`).
+- `donation-vault`: `create_stream` rejects a stream whose `donor` and `ngo`
+  are the same address with `Error::SelfStream`, so a deposit can't be
+  counted as a committed donation while streaming straight back to its donor.
+- `donation-vault`: the immediate `upgrade` entry point now refuses to run while
+  a non-zero `upgrade_delay` is configured, returning
+  `Error::UpgradeTimelockEnabled` instead. Upgrades must then go through
+  `propose_upgrade` / `execute_upgrade`; setting the delay back to zero via
+  `set_upgrade_delay(0)` explicitly re-enables the immediate path (#343).
 - Both contracts migrated event declarations from deprecated
   `Events::publish` to explicit `#[contractevent]` types. Topic names and
   positional payload formats are declared in code and documented in
@@ -148,6 +288,23 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Fixed
 
+- `donation-vault`: renumbered `Error::StreamAlreadyPaused` (was 26) and
+  `Error::StreamNotPaused` (was 27) to 32 and 33. Their old discriminants
+  collided with `Error::InvalidNgo` (26) and `Error::InvalidToken` (27),
+  which failed to compile (`E0081: discriminant value assigned more than
+  once`). Per the append-only policy the newer variants move; `InvalidNgo`
+  and `InvalidToken` keep their numbers. Any client matching on the old
+  numbers for the two pause variants must update.
+- `donation-vault`: `modify_rate` re-verifies the NGO with the configured
+  registry when the rate is raised, matching `top_up` and `transfer_stream`,
+  and fails with `Error::NgoNotVerified` for a revoked NGO. Lowering the rate
+  is still allowed (#330).
+- `donation-vault`: `create_stream` rejects the vault's own address as the
+  NGO (`Error::InvalidNgo`) or the token (`Error::InvalidToken`) before any
+  state is written (#331).
+- `donation-vault`: `withdraw` and `withdraw_batch` return
+  `Error::ArithmeticOverflow` if the fee/net split cannot be computed,
+  instead of reporting a fee of zero (#332).
 - `donation-vault`: `set_treasury` rejects the vault's own address with
   `Error::InvalidTreasury`, so protocol fees can't be locked in the contract.
 - `donation-vault`: `create_stream`, `top_up`, `cancel_stream`, and `settle`

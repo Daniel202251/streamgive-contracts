@@ -1,85 +1,215 @@
 // SPDX-License-Identifier: Apache-2.0
+//! NGO registry contract for the StreamGive protocol.
+//!
+//! Maintains a registry of registered and verified non-governmental organisations
+//! (NGOs). Admins and approvers can approve, reject, revoke, and renew entries;
+//! the registry is queried by the donation-vault contract before a stream is opened.
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
     Env, String, Vec,
 };
 
+/// Event emitted when an NGO registers.
 #[contractevent(topics = ["register"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RegisterEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO renames its pending application.
 #[contractevent(topics = ["renamed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenamedEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO is approved.
 #[contractevent(topics = ["approved"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApprovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO's verification is revoked.
 #[contractevent(topics = ["revoked"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RevokedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO unregisters itself.
 #[contractevent(topics = ["unregist"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UnregisteredEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an admin removes an NGO entry.
 #[contractevent(topics = ["removed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RemovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO application is rejected.
+#[contractevent(topics = ["rejected"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct RejectedEvent {
+    #[topic]
+    pub owner: Address,
+    pub reason_code: u32,
+}
+
+/// Event emitted when a new admin is proposed.
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ProposedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when a proposed admin accepts the role.
 #[contractevent(topics = ["acptadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct AcceptedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when an admin proposal is cancelled.
 #[contractevent(topics = ["canceladm"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct CancelledAdminEvent {
     pub data: (),
 }
 
+/// Event emitted when the contract is initialized.
 #[contractevent(topics = ["init"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct InitializedEvent {
     pub admin: Address,
 }
 
+/// Event emitted when the contract is upgraded.
 #[contractevent(topics = ["upgrade"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when an approver is added.
+#[contractevent(topics = ["apadd"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct ApproverAddedEvent {
+    #[topic]
+    pub approver: Address,
+    pub data: (),
+}
+
+/// Event emitted when an approver is removed.
+#[contractevent(topics = ["aprem"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct ApproverRemovedEvent {
+    #[topic]
+    pub approver: Address,
+    pub data: (),
+}
+
+/// Event emitted when an NGO's metadata URI is set or cleared.
+#[contractevent(topics = ["metadata"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct MetadataUriSetEvent {
+    #[topic]
+    pub owner: Address,
+    pub metadata_uri: Option<String>,
+}
+
+/// Event emitted when a verification is renewed.
+#[contractevent(topics = ["renew"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct RenewedEvent {
+    #[topic]
+    pub owner: Address,
+    /// The new verification expiry, as a ledger timestamp.
+    pub verified_until: u64,
+}
+
+/// Event emitted when the verification period is configured.
+#[contractevent(topics = ["verperiod"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct VerifyPeriodSetEvent {
+    pub verify_period: u64,
+}
+
 #[contracttype]
-// Debug and PartialEq let tests assert_eq! on a try_* call’s full
+// Debug and PartialEq let tests assert_eq! on a try_* callâ€™s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ngo {
+    /// The address that registered and owns this NGO entry.
     pub owner: Address,
+    /// The display name of the NGO, bounded by `MAX_NGO_NAME_LEN`.
     pub name: String,
+    /// Whether an admin or approver has approved this entry.
     pub verified: bool,
+    /// Optional owner-supplied reference to off-chain metadata (a website,
+    /// description, or logo), so an entry can be linked to what the NGO
+    /// publishes about itself. `None` until the owner calls
+    /// `set_metadata_uri`. Bounded by `MAX_METADATA_URI_LEN`. See issue #347.
+    pub metadata_uri: Option<String>,
+    /// Optional ledger timestamp at which this verification lapses. Set by
+    /// `approve_ngo` / `batch_approve` from the configured verification period
+    /// (see `set_verify_period`), and moved forward by `renew_ngo`. `None` means
+    /// the verification never expires. Once the current ledger timestamp
+    /// reaches it the entry is treated as unverified by `is_verified` and
+    /// `get_ngo`, until an admin renews it. See issue #348.
+    pub verified_until: Option<u64>,
+}
+
+/// The verification state of an NGO owner address, returned by `verification_status`.
+///
+/// Distinguishes the five cases that `is_verified` collapses into a single
+/// `false`: an address that was never registered (`Unknown`), one that is
+/// registered but not yet reviewed (`Pending`), one that is currently
+/// verified and not expired (`Verified`), one whose verification period has
+/// lapsed (`Expired`), and one whose approval was explicitly revoked
+/// (`Revoked`). See issue #448.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VerificationStatus {
+    /// No entry exists for this address.
+    Unknown,
+    /// Registered but not yet approved or rejected.
+    Pending,
+    /// Approved and the verification has not expired.
+    Verified,
+    /// Was approved but the `verified_until` timestamp has passed.
+    Expired,
+    /// Approval was explicitly revoked by an admin or approver.
+    Revoked,
+}
+
+/// A single page of the NGO owners index, returned by `list_ngos_page`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NgoOwnerPage {
+    /// The owner addresses in this page, in registry order.
+    pub owners: Vec<Address>,
+    /// The `start` to pass on the next call: one past the end of this page,
+    /// clamped to the current owner count. Iteration is complete once it
+    /// reaches `total_ngos()` (or `ngo_count()`).
+    pub next: u32,
 }
 
 #[contracttype]
@@ -102,17 +232,35 @@ pub enum DataKey {
     OwnerByIndex(u32),
     /// Index of a registered NGO owner in the owners index.
     IndexByOwner(Address),
+    /// Addresses (other than the admin) permitted to approve and revoke NGOs.
+    Approvers,
+    /// Current number of verified NGO records, maintained by the review and
+    /// removal entry points and read by `verified_count`.
+    VerifiedCount,
+    /// Set when an NGO's approval is explicitly revoked. Cleared on
+    /// re-approval. Used by `verification_status` to distinguish `Revoked`
+    /// from `Pending`. See issue #448.
+    NgoRevoked(Address),
+    /// The verification period in seconds applied to new approvals and to
+    /// `renew_ngo`. `0` (the default) means approvals never expire. See
+    /// `set_verify_period`.
+    VerifyPeriod,
 }
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// The registry has already been initialized and cannot be initialized again.
     AlreadyInitialized = 1,
+    /// The registry has not been initialized yet.
     NotInitialized = 2,
+    /// The owner address is already registered.
     AlreadyRegistered = 3,
+    /// The owner address is not registered.
     NotRegistered = 4,
-    /// The NGO has already been approved, so its name is locked.
+    /// The NGO has already been approved: it can no longer be unregistered,
+    /// renamed, rejected, or approved again. Revoke it first.
     AlreadyVerified = 5,
     /// `name` is longer than `MAX_NGO_NAME_LEN` (200 bytes).
     NameTooLong = 6,
@@ -124,10 +272,25 @@ pub enum Error {
     NoPendingAdmin = 8,
     /// The proposed administrator is not a valid replacement.
     InvalidAdmin = 9,
+    /// An arithmetic operation overflowed or underflowed its type bounds.
     ArithmeticOverflow = 10,
     /// The supplied name is empty, contains only Unicode whitespace or invisible
     /// format characters, contains control characters, or is invalid UTF-8.
     InvalidName = 11,
+    /// `approve_ngo`, `batch_approve`, or `revoke_ngo` was called by an address
+    /// that is neither the admin nor a listed approver.
+    NotApprover = 12,
+    /// `add_approver` was called for an address already in the approver list.
+    AlreadyApprover = 13,
+    /// The supplied metadata URI is longer than `MAX_METADATA_URI_LEN`
+    /// (512 bytes).
+    MetadataUriTooLong = 14,
+    /// `renew_ngo` was called while no verification period is configured, so
+    /// there is no expiry to extend. Set one with `set_verify_period`.
+    NoVerifyPeriod = 15,
+    // Error numbers are append-only: never renumber, reuse, or remove a
+    // variant. New errors take the next unused number. See
+    // docs/UPGRADE_POLICY.md.
 }
 
 /// Upper bound on `Ngo.name`, in bytes. Persistent storage cost scales with
@@ -137,8 +300,14 @@ pub enum Error {
 /// Note: this is strictly a byte limit (200 bytes), not a character limit.
 pub const MAX_NGO_NAME_LEN: u32 = 200;
 
-/// Maximum number of NGO owners returned by `list_ngos` in a single page.
-/// Caps read footprint, memory, and gas consumption to keep pagination bounded.
+/// Upper bound on `Ngo.metadata_uri`, in bytes. As with `MAX_NGO_NAME_LEN`,
+/// this keeps a single entry's storage footprint bounded; 512 bytes fits a
+/// typical URL (including a logo or IPFS reference) with room to spare.
+pub const MAX_METADATA_URI_LEN: u32 = 512;
+
+/// Maximum number of NGO owners returned by `list_ngos` / `list_ngos_page` in
+/// a single page. Caps read footprint, memory, and gas consumption to keep
+/// pagination bounded.
 pub const MAX_LIST_LIMIT: u32 = 50;
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -190,6 +359,39 @@ fn set_owner_count(env: &Env, count: u32) {
     env.storage()
         .instance()
         .set(&DataKey::OwnerIndexCount, &count);
+}
+
+fn get_verified_count(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::VerifiedCount)
+        .unwrap_or(0)
+}
+
+fn set_verified_count(env: &Env, count: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::VerifiedCount, &count);
+}
+
+/// Reads the configured verification period in seconds. `0` (the default)
+/// means approvals never expire. See `set_verify_period`.
+fn get_verify_period(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::VerifyPeriod)
+        .unwrap_or(0)
+}
+
+/// Returns whether a verification expiry has lapsed at the current ledger
+/// time. `None` never expires. An entry stays valid while
+/// `now < verified_until`, so it is treated as unverified once `now` reaches
+/// the stored timestamp. See issue #348.
+fn has_expired(env: &Env, verified_until: Option<u64>) -> bool {
+    match verified_until {
+        Some(until) => env.ledger().timestamp() >= until,
+        None => false,
+    }
 }
 
 /// Returns whether a code point is an invisible or format character (category Cf).
@@ -263,6 +465,21 @@ fn validate_name(name: &String) -> Result<(), Error> {
     validate_name_bytes(&buf[..len])
 }
 
+/// Validates an optional NGO metadata URI.
+///
+/// `None` is always allowed. `Some` must be at most `MAX_METADATA_URI_LEN`
+/// (512 bytes) or the call fails with `Error::MetadataUriTooLong`. The URI is
+/// opaque to the contract â€” an `https://`, `ipfs://`, or any other scheme is
+/// accepted â€” so only the length is enforced. See issue #347.
+fn validate_metadata_uri(uri: &Option<String>) -> Result<(), Error> {
+    if let Some(u) = uri {
+        if u.len() > MAX_METADATA_URI_LEN {
+            return Err(Error::MetadataUriTooLong);
+        }
+    }
+    Ok(())
+}
+
 /// Reads the configured admin and requires their auth, failing with
 /// `Error::NotInitialized` if `init` hasn't been called yet. Shared by
 /// every admin-gated entry point so the same three steps aren't repeated
@@ -275,6 +492,39 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
         .ok_or(Error::NotInitialized)?;
     admin.require_auth();
     Ok(admin)
+}
+
+/// Reads the stored approver list, or an empty list if none was set.
+fn read_approvers(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Approvers)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns whether `candidate` is in the approver list. The admin is not
+/// stored here, so this reflects explicit approvers only.
+fn is_approver_address(env: &Env, candidate: &Address) -> bool {
+    read_approvers(env).contains(candidate)
+}
+
+/// Authorizes a review action (approve/revoke). The acting address must be
+/// either the admin or a listed approver, and must have authorized the call.
+/// Because a contract can't observe its own caller, the acting address is
+/// passed in by the caller and checked here: this is what lets review work be
+/// delegated without handing out the admin key. Fails with
+/// `Error::NotApprover` for anyone else.
+fn require_approver(env: &Env, candidate: &Address) -> Result<(), Error> {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(Error::NotInitialized)?;
+    if *candidate != admin && !is_approver_address(env, candidate) {
+        return Err(Error::NotApprover);
+    }
+    candidate.require_auth();
+    Ok(())
 }
 
 /// Marks one registered, unverified NGO as verified and publishes its
@@ -293,7 +543,31 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
         return Err(Error::AlreadyVerified);
     }
     ngo.verified = true;
+    // Stamp the verification expiry from the configured period (issue #348).
+    // A zero period leaves `verified_until` as `None`, i.e. no expiry, which
+    // is the default and matches the pre-expiry behaviour.
+    let period = get_verify_period(env);
+    ngo.verified_until = if period == 0 {
+        None
+    } else {
+        Some(
+            env.ledger()
+                .timestamp()
+                .checked_add(period)
+                .ok_or(Error::ArithmeticOverflow)?,
+        )
+    };
     env.storage().persistent().set(&key, &ngo);
+    // Clear any prior revocation flag so `verification_status` returns
+    // `Verified` rather than `Revoked` after a re-approval. See issue #448.
+    env.storage()
+        .persistent()
+        .remove(&DataKey::NgoRevoked(ngo_owner.clone()));
+
+    let verified = get_verified_count(env);
+    let new_verified = verified.checked_add(1).ok_or(Error::ArithmeticOverflow)?;
+    set_verified_count(env, new_verified);
+
     extend_instance_ttl(env);
     extend_ngo_ttl(env, &ngo_owner);
 
@@ -307,11 +581,13 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
 }
 
 /// Deletes an NGO's registry entry and its position in the owners index,
-/// shrinking the live counts. Shared by `unregister` (owner-initiated) and
-/// `remove_ngo` (admin-initiated); the caller is responsible for authorizing
-/// the call and for the verified/unverified check. Does not touch the
-/// instance TTL — the caller decides whether to bump it. Decrements `NgoCount`
-/// using checked subtraction, returning `Error::ArithmeticOverflow` on underflow.
+/// shrinking the live counts. Shared by `unregister` (owner-initiated),
+/// `remove_ngo` (admin-initiated) and `reject_ngo` (reviewer-initiated); the
+/// caller is responsible for authorizing the call and for the
+/// verified/unverified check. Does not touch the instance TTL â€” the caller
+/// decides whether to bump it. Decrements `NgoCount`, and `VerifiedCount` when
+/// the entry being removed was verified, using checked subtraction and
+/// returning `Error::ArithmeticOverflow` on underflow.
 fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
     let count: u64 = env
         .storage()
@@ -319,6 +595,19 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
         .get(&DataKey::NgoCount)
         .unwrap_or(0);
     let new_ngo_count = count.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
+
+    // Keep `verified_count` in step with the entry being removed.
+    if let Some(ngo) = env
+        .storage()
+        .persistent()
+        .get::<_, Ngo>(&DataKey::Ngo(owner.clone()))
+    {
+        if ngo.verified {
+            let verified = get_verified_count(env);
+            let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
+            set_verified_count(env, new_verified);
+        }
+    }
 
     env.storage()
         .persistent()
@@ -604,6 +893,8 @@ impl NgoRegistry {
             owner: owner.clone(),
             name: name.clone(),
             verified: false,
+            metadata_uri: None,
+            verified_until: None,
         };
         env.storage().persistent().set(&key, &ngo);
 
@@ -720,6 +1011,206 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Rejects a pending NGO application, removing its entry and publishing the
+    /// supplied `reason_code` so the applicant's client can explain why it was
+    /// not approved. Callable by the admin or any listed approver (see
+    /// `add_approver`), and the counterpart to `approve_ngo` for a reviewer who
+    /// decides against an application rather than leaving it pending.
+    ///
+    /// The entry, its position in the owners index, and the live counts are
+    /// cleared exactly as in `remove_ngo`, so the owner can address the problem
+    /// and register again. The `reason_code` is an opaque, caller-defined
+    /// integer (for example, an off-chain enum agreed between the registry and
+    /// its clients); the contract keeps no record of it beyond the event.
+    ///
+    /// Returns `Error::NotRegistered` for an address with no entry. A verified
+    /// NGO cannot be rejected â€” an approval is undone with `revoke_ngo` first â€”
+    /// and fails with `Error::AlreadyVerified`. An address that is neither the
+    /// admin nor a listed approver fails with `Error::NotApprover`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let applicant = Address::generate(&env);
+    /// client.register(&applicant, &String::from_str(&env, "Unverified Charity"));
+    ///
+    /// // 3 = "could not verify registration documents".
+    /// client.reject_ngo(&admin, &applicant, &3);
+    /// assert!(client.try_get_ngo(&applicant).is_err());
+    /// ```
+    pub fn reject_ngo(
+        env: Env,
+        approver: Address,
+        ngo_owner: Address,
+        reason_code: u32,
+    ) -> Result<(), Error> {
+        require_approver(&env, &approver)?;
+
+        let key = DataKey::Ngo(ngo_owner.clone());
+        let ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+        if ngo.verified {
+            return Err(Error::AlreadyVerified);
+        }
+
+        delete_ngo_entry(&env, &ngo_owner)?;
+
+        extend_instance_ttl(&env);
+        RejectedEvent {
+            owner: ngo_owner,
+            reason_code,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Adds an address to the approver list. Admin-only.
+    ///
+    /// Approvers may call `approve_ngo`, `batch_approve`, `reject_ngo`, and
+    /// `revoke_ngo`
+    /// without holding the admin key, which is how review work is delegated
+    /// without granting control over upgrades or admin transfer. The admin is
+    /// always able to review whether or not it appears in this list, so adding
+    /// the admin is allowed but unnecessary. Fails with
+    /// `Error::AlreadyApprover` if the address is already listed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let reviewer = Address::generate(&env);
+    /// client.add_approver(&reviewer);
+    /// assert!(client.is_approver(&reviewer));
+    /// ```
+    pub fn add_approver(env: Env, approver: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+
+        let mut approvers = read_approvers(&env);
+        if approvers.contains(&approver) {
+            return Err(Error::AlreadyApprover);
+        }
+        approvers.push_back(approver.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::Approvers, &approvers);
+        extend_instance_ttl(&env);
+
+        ApproverAddedEvent { approver, data: () }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Removes an address from the approver list. Admin-only.
+    ///
+    /// The address can no longer approve or revoke NGOs; any NGO it approved
+    /// stays approved. Fails with `Error::NotApprover` if the address is not
+    /// currently listed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let reviewer = Address::generate(&env);
+    /// client.add_approver(&reviewer);
+    /// client.remove_approver(&reviewer);
+    /// assert!(!client.is_approver(&reviewer));
+    /// ```
+    pub fn remove_approver(env: Env, approver: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+
+        let approvers = read_approvers(&env);
+        let mut remaining = Vec::new(&env);
+        let mut found = false;
+        for listed in approvers.iter() {
+            if listed == approver {
+                found = true;
+            } else {
+                remaining.push_back(listed);
+            }
+        }
+        if !found {
+            return Err(Error::NotApprover);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Approvers, &remaining);
+        extend_instance_ttl(&env);
+
+        ApproverRemovedEvent { approver, data: () }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns whether an address is in the approver list.
+    ///
+    /// Reflects explicit approvers only: the admin can always approve and
+    /// revoke NGOs, so this returns `false` for the admin unless it was also
+    /// added with `add_approver`. Never errors or panics.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let reviewer = Address::generate(&env);
+    /// assert!(!client.is_approver(&reviewer));
+    /// client.add_approver(&reviewer);
+    /// assert!(client.is_approver(&reviewer));
+    /// ```
+    pub fn is_approver(env: Env, addr: Address) -> bool {
+        is_approver_address(&env, &addr)
+    }
+
+    /// Returns every address in the approver list, in the order they were
+    /// added. Returns an empty list when none are configured. Never errors or
+    /// panics.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let reviewer = Address::generate(&env);
+    /// client.add_approver(&reviewer);
+    /// assert_eq!(client.list_approvers().len(), 1);
+    /// ```
+    pub fn list_approvers(env: Env) -> Vec<Address> {
+        read_approvers(&env)
+    }
+
     /// Returns a paginated list of registered NGO owner addresses.
     ///
     /// # Pagination Semantics
@@ -773,11 +1264,72 @@ impl NgoRegistry {
         owners
     }
 
+    /// Returns one page of registered NGO owner addresses together with the
+    /// index to use for the following page.
+    ///
+    /// Same `start`/`limit` semantics, ordering, and `MAX_LIST_LIMIT` cap as
+    /// `list_ngos`, but instead of leaving callers to recompute the cursor it
+    /// also returns `next`, the `start` for the next call. Because `next`
+    /// reaches the total owner count on the final page, a caller can tell the
+    /// end of the list apart from a full page without a follow-up call.
+    ///
+    /// `next` is the exclusive end of this page (one past its last owner),
+    /// clamped to the owner count. Iteration is complete once
+    /// `next >= total_ngos()`. An out-of-range `start` or a `limit == 0`
+    /// returns an empty `owners` and `next` equal to the owner count, so the
+    /// caller stops immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let owner = Address::generate(&env);
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    ///
+    /// let page = client.list_ngos_page(&0, &10);
+    /// assert_eq!(page.owners.get(0).unwrap(), owner);
+    /// assert_eq!(page.next, 1);
+    /// ```
+    pub fn list_ngos_page(env: Env, start: u32, limit: u32) -> NgoOwnerPage {
+        let count = get_owner_count(&env);
+        if start >= count || limit == 0 {
+            return NgoOwnerPage {
+                owners: Vec::new(&env),
+                next: count,
+            };
+        }
+
+        let effective_limit = limit.min(MAX_LIST_LIMIT);
+        let end = start
+            .checked_add(effective_limit)
+            .unwrap_or(count)
+            .min(count);
+
+        let mut owners = Vec::new(&env);
+        for index in start..end {
+            if let Some(owner) = env
+                .storage()
+                .persistent()
+                .get::<_, Address>(&DataKey::OwnerByIndex(index))
+            {
+                owners.push_back(owner);
+            }
+        }
+
+        NgoOwnerPage { owners, next: end }
+    }
+
     /// Changes the name on an NGO's own pending application, so a typo or
     /// rename can be fixed without going through an admin. Requires the
     /// owner's auth. Fails with `Error::NotRegistered` for an address with
     /// no entry, and `Error::AlreadyVerified` once an admin has approved
-    /// it — the name an admin approved is the name that stays.
+    /// it â€” the name an admin approved is the name that stays.
     ///
     /// The new name must meet the same validation rules as in `register`: at most
     /// 200 bytes, valid UTF-8, at least one visible character, and no control characters.
@@ -827,7 +1379,107 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Sets or clears the metadata URI on the caller's own NGO entry, so an
+    /// entry can point at off-chain metadata such as a website, description,
+    /// or logo. Requires the owner's auth; the entry must already be
+    /// registered, or the call fails with `Error::NotRegistered`.
+    ///
+    /// The URI is opaque to the contract â€” any scheme (`https://`, `ipfs://`,
+    /// â€¦) is accepted â€” and must be at most `MAX_METADATA_URI_LEN` (512 bytes),
+    /// or the call fails with `Error::MetadataUriTooLong`. Pass `None` to clear
+    /// it. Unlike `update_name`, this is not locked by verification: an NGO can
+    /// keep its published metadata current after approval. Publishes a
+    /// `MetadataUriSetEvent`, but only when the value actually changes. See
+    /// issue #347.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// let uri = Some(String::from_str(&env, "https://example.org/about"));
+    /// client.set_metadata_uri(&owner, &uri);
+    /// assert_eq!(client.get_ngo(&owner).metadata_uri, uri);
+    /// ```
+    pub fn set_metadata_uri(
+        env: Env,
+        owner: Address,
+        metadata_uri: Option<String>,
+    ) -> Result<(), Error> {
+        owner.require_auth();
+
+        validate_metadata_uri(&metadata_uri)?;
+
+        let key = DataKey::Ngo(owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        // Only write and emit when the URI actually changes, matching
+        // `update_name`.
+        if ngo.metadata_uri != metadata_uri {
+            ngo.metadata_uri = metadata_uri.clone();
+            env.storage().persistent().set(&key, &ngo);
+            extend_instance_ttl(&env);
+            extend_ngo_ttl(&env, &owner);
+
+            MetadataUriSetEvent {
+                owner,
+                metadata_uri,
+            }
+            .publish(&env);
+        }
+
+        Ok(())
+    }
+
+    /// Reads back an NGO's metadata URI, or `None` when it has none set.
+    ///
+    /// Never errors or panics: an unregistered address, and a registered
+    /// entry that hasn't called `set_metadata_uri`, both return `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.metadata_uri(&owner), None);
+    ///
+    /// let uri = Some(String::from_str(&env, "https://example.org"));
+    /// client.set_metadata_uri(&owner, &uri);
+    /// assert_eq!(client.metadata_uri(&owner), uri);
+    /// ```
+    pub fn metadata_uri(env: Env, owner: Address) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get::<_, Ngo>(&DataKey::Ngo(owner))
+            .and_then(|ngo| ngo.metadata_uri)
+    }
+
     /// Reads back an NGO's registry entry, registered or not.
+    ///
+    /// A verification whose `verified_until` has passed is reported as
+    /// unverified (`verified: false`), so callers never act on a lapsed
+    /// approval; the stored flag and the past timestamp are left in place and
+    /// can be reactivated with `renew_ngo`. See issue #348.
     ///
     /// # Examples
     ///
@@ -848,15 +1500,21 @@ impl NgoRegistry {
     /// assert!(!ngo.verified);
     /// ```
     pub fn get_ngo(env: Env, owner: Address) -> Result<Ngo, Error> {
-        env.storage()
+        let mut ngo: Ngo = env
+            .storage()
             .persistent()
             .get(&DataKey::Ngo(owner))
-            .ok_or(Error::NotRegistered)
+            .ok_or(Error::NotRegistered)?;
+        if ngo.verified && has_expired(&env, ngo.verified_until) {
+            ngo.verified = false;
+        }
+        Ok(ngo)
     }
 
-    /// Returns whether an address is a registered, verified NGO.
-    /// Unknown and unverified addresses both return `false`.
-    /// Never errors or panics.
+    /// Returns whether an address is a currently verified, registered NGO.
+    /// Unknown and unverified addresses both return `false`, as does an
+    /// address whose verification has lapsed (`verified_until` passed).
+    /// Never errors or panics. See issue #348.
     ///
     /// # Examples
     ///
@@ -872,13 +1530,66 @@ impl NgoRegistry {
     /// let name = String::from_str(&env, "Example NGO");
     /// client.register(&owner, &name);
     /// assert!(!client.is_verified(&owner));
-    /// client.approve_ngo(&owner);
+    /// client.approve_ngo(&admin, &owner);
     /// assert!(client.is_verified(&owner));
     /// ```
     pub fn is_verified(env: Env, owner: Address) -> bool {
         Self::get_ngo(env, owner)
             .map(|ngo| ngo.verified)
             .unwrap_or(false)
+    }
+
+    /// Returns the detailed verification state of `owner`, distinguishing the
+    /// five cases that `is_verified` collapses into a single `false`:
+    /// `Unknown` (no entry), `Pending` (registered, not yet reviewed),
+    /// `Verified` (approved and not expired), `Expired` (approved but
+    /// `verified_until` has passed), and `Revoked` (approval was explicitly
+    /// revoked). Never errors or panics. See issue #448.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, VerificationStatus};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let owner = Address::generate(&env);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Unknown);
+    ///
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Pending);
+    ///
+    /// client.approve_ngo(&admin, &owner);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
+    /// ```
+    pub fn verification_status(env: Env, owner: Address) -> VerificationStatus {
+        let ngo: Ngo = match env.storage().persistent().get(&DataKey::Ngo(owner.clone())) {
+            Some(n) => n,
+            None => return VerificationStatus::Unknown,
+        };
+
+        if ngo.verified {
+            if has_expired(&env, ngo.verified_until) {
+                return VerificationStatus::Expired;
+            }
+            return VerificationStatus::Verified;
+        }
+
+        // verified == false: distinguish Revoked from Pending via the flag
+        // set by revoke_ngo and cleared by approve_registered_ngo.
+        let revoked: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NgoRevoked(owner))
+            .unwrap_or(false);
+        if revoked {
+            VerificationStatus::Revoked
+        } else {
+            VerificationStatus::Pending
+        }
     }
 
     /// Reads back the total number of registered NGOs.
@@ -911,10 +1622,108 @@ impl NgoRegistry {
             .unwrap_or(0)
     }
 
-    /// Marks a registered NGO as verified. Admin-only. Fails with
+    /// Returns how many registered NGO entries are currently verified.
+    ///
+    /// Backed by a single stored counter, kept in step by `approve_ngo` /
+    /// `batch_approve` (increment), `revoke_ngo` (decrement), and removal of a
+    /// verified entry (decrement), so a dashboard can read the verified tally
+    /// without listing and filtering every entry.
+    ///
+    /// The counter tracks the stored verification flag. Time never clears that
+    /// flag, so an entry whose `verified_until` has lapsed still counts here
+    /// until an admin revokes or renews it, even though `is_verified` already
+    /// reports it as unverified. See issue #348.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let owner = Address::generate(&env);
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.verified_count(), 0);
+    ///
+    /// client.approve_ngo(&admin, &owner);
+    /// assert_eq!(client.verified_count(), 1);
+    /// ```
+    pub fn verified_count(env: Env) -> u64 {
+        get_verified_count(&env)
+    }
+
+    /// Sets the verification period, in seconds, that `approve_ngo` /
+    /// `batch_approve` and `renew_ngo` add to the current ledger time to stamp
+    /// an entry's `verified_until`. Admin-only.
+    ///
+    /// A period of `0` (the default) means approvals never expire:
+    /// `verified_until` stays `None`. Changing the period only affects future
+    /// approvals and renewals; entries already approved keep their existing
+    /// expiry until they are renewed. Fails with `Error::NotInitialized`
+    /// before `init`. Publishes a `VerifyPeriodSetEvent`. See issue #348.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// assert_eq!(client.verify_period(), 0);
+    ///
+    /// // Verifications last one year.
+    /// client.set_verify_period(&(365 * 24 * 60 * 60));
+    /// assert_eq!(client.verify_period(), 365 * 24 * 60 * 60);
+    /// ```
+    pub fn set_verify_period(env: Env, seconds: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::VerifyPeriod, &seconds);
+        extend_instance_ttl(&env);
+
+        VerifyPeriodSetEvent {
+            verify_period: seconds,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Reads back the configured verification period in seconds. `0` means
+    /// approvals never expire. Never errors or panics. See `set_verify_period`
+    /// and issue #348.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// assert_eq!(client.verify_period(), 0);
+    /// ```
+    pub fn verify_period(env: Env) -> u64 {
+        get_verify_period(&env)
+    }
+
+    /// Marks a registered NGO as verified. Callable by the admin or a listed
+    /// approver; `approver` names the acting address and must have authorized
+    /// the call (see `add_approver`). Fails with
     /// `Error::AlreadyVerified` if the NGO is already verified, so a
     /// repeated call can't rewrite the entry or publish a duplicate
-    /// `approved` event.
+    /// `approved` event, and `Error::NotApprover` if `approver` is neither the
+    /// admin nor a listed approver.
     ///
     /// # Examples
     ///
@@ -930,15 +1739,17 @@ impl NgoRegistry {
     /// # let owner = Address::generate(&env);
     /// # let name = String::from_str(&env, "Example NGO");
     /// # client.register(&owner, &name);
-    /// client.approve_ngo(&owner);
+    /// client.approve_ngo(&admin, &owner);
     /// assert!(client.get_ngo(&owner).verified);
     /// ```
-    pub fn approve_ngo(env: Env, ngo_owner: Address) -> Result<(), Error> {
-        require_admin(&env)?;
+    pub fn approve_ngo(env: Env, approver: Address, ngo_owner: Address) -> Result<(), Error> {
+        require_approver(&env, &approver)?;
         approve_registered_ngo(&env, ngo_owner)
     }
 
-    /// Marks several registered NGOs as verified in a single call. Admin-only.
+    /// Marks several registered NGOs as verified in a single call. Callable by
+    /// the admin or a listed approver; `approver` names the acting address and
+    /// must have authorized the call.
     ///
     /// Approves each owner in order, publishing one `approved` event per NGO
     /// exactly as `approve_ngo` would. The call is atomic: if any owner has no
@@ -962,10 +1773,10 @@ impl NgoRegistry {
     /// client.register(&a, &String::from_str(&env, "Red Cross"));
     /// client.register(&b, &String::from_str(&env, "Oxfam"));
     ///
-    /// client.batch_approve(&vec![&env, a, b]);
+    /// client.batch_approve(&admin, &vec![&env, a, b]);
     /// ```
-    pub fn batch_approve(env: Env, owners: Vec<Address>) -> Result<(), Error> {
-        require_admin(&env)?;
+    pub fn batch_approve(env: Env, approver: Address, owners: Vec<Address>) -> Result<(), Error> {
+        require_approver(&env, &approver)?;
         for ngo_owner in owners.iter() {
             approve_registered_ngo(&env, ngo_owner)?;
         }
@@ -973,10 +1784,13 @@ impl NgoRegistry {
     }
 
     /// Reverses a prior approval, marking a registered NGO as unverified
-    /// again. Admin-only. Returns `Error::NotRegistered` for an address
-    /// with no entry, matching `approve_ngo`'s existing behavior, and
-    /// `Error::NotVerified` if the NGO isn't currently verified, so a
-    /// repeated call can't publish a duplicate `revoked` event.
+    /// again. Callable by the admin or a listed approver; `approver` names the
+    /// acting address and must have authorized the call. Returns
+    /// `Error::NotRegistered` for an address with no entry, matching
+    /// `approve_ngo`'s existing behavior, `Error::NotVerified` if the NGO
+    /// isn't currently verified, so a repeated call can't publish a duplicate
+    /// `revoked` event, and `Error::NotApprover` if `approver` is neither the
+    /// admin nor a listed approver.
     ///
     /// # Examples
     ///
@@ -992,12 +1806,12 @@ impl NgoRegistry {
     /// # let owner = Address::generate(&env);
     /// # let name = String::from_str(&env, "Example NGO");
     /// # client.register(&owner, &name);
-    /// # client.approve_ngo(&owner);
-    /// client.revoke_ngo(&owner);
+    /// # client.approve_ngo(&admin, &owner);
+    /// client.revoke_ngo(&admin, &owner);
     /// assert!(!client.get_ngo(&owner).verified);
     /// ```
-    pub fn revoke_ngo(env: Env, ngo_owner: Address) -> Result<(), Error> {
-        require_admin(&env)?;
+    pub fn revoke_ngo(env: Env, approver: Address, ngo_owner: Address) -> Result<(), Error> {
+        require_approver(&env, &approver)?;
 
         let key = DataKey::Ngo(ngo_owner.clone());
         let mut ngo: Ngo = env
@@ -1009,7 +1823,20 @@ impl NgoRegistry {
             return Err(Error::NotVerified);
         }
         ngo.verified = false;
+        // A revoked verification has no expiry to keep; clear it so the entry
+        // doesn't carry a stale timestamp (#348).
+        ngo.verified_until = None;
         env.storage().persistent().set(&key, &ngo);
+        // Mark as revoked so `verification_status` can distinguish this from
+        // a pending (never-approved) entry. See issue #448.
+        env.storage()
+            .persistent()
+            .set(&DataKey::NgoRevoked(ngo_owner.clone()), &true);
+
+        let verified = get_verified_count(&env);
+        let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
+        set_verified_count(&env, new_verified);
+
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &ngo_owner);
 
@@ -1022,8 +1849,80 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Extends a lapsed â€” or still-valid â€” verification by the configured
+    /// period, moving its `verified_until` forward from the current ledger
+    /// time. Admin-only.
+    ///
+    /// This is the periodic-renewal counterpart to `approve_ngo`: an entry
+    /// whose verification has lapsed needs an admin to renew it, because
+    /// nothing on-chain flips the stored flag back on its own. The entry must
+    /// be registered (`Error::NotRegistered`) and its stored verification flag
+    /// must be set (`Error::NotVerified`); the flag stays set after a lapse, so
+    /// an expired entry can be renewed, while one that was never approved or
+    /// was revoked must be approved first. Renewal requires a non-zero
+    /// configured period, or it fails with `Error::NoVerifyPeriod`. Fails with
+    /// `Error::NotInitialized` before `init`. Publishes a `RenewedEvent` with
+    /// the new expiry. See issue #348.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// client.set_verify_period(&(365 * 24 * 60 * 60));
+    /// let owner = Address::generate(&env);
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// client.approve_ngo(&admin, &owner);
+    ///
+    /// // A year later the verification has lapsed, and renewing it revives it.
+    /// client.renew_ngo(&owner);
+    /// assert!(client.is_verified(&owner));
+    /// ```
+    pub fn renew_ngo(env: Env, ngo_owner: Address) -> Result<(), Error> {
+        require_admin(&env)?;
+
+        let period = get_verify_period(&env);
+        if period == 0 {
+            return Err(Error::NoVerifyPeriod);
+        }
+
+        let key = DataKey::Ngo(ngo_owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+        if !ngo.verified {
+            return Err(Error::NotVerified);
+        }
+
+        let verified_until = env
+            .ledger()
+            .timestamp()
+            .checked_add(period)
+            .ok_or(Error::ArithmeticOverflow)?;
+        ngo.verified_until = Some(verified_until);
+        env.storage().persistent().set(&key, &ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &ngo_owner);
+
+        RenewedEvent {
+            owner: ngo_owner,
+            verified_until,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     /// Bumps a registered NGO entry's storage TTL without changing
-    /// anything about it. Callable by anyone — a verified NGO that
+    /// anything about it. Callable by anyone â€” a verified NGO that
     /// `register`, `approve_ngo`, and `revoke_ngo` haven't touched in a
     /// while would otherwise have its entry archived after 90 days, with
     /// no other way to keep it alive.
@@ -1087,4 +1986,6 @@ impl NgoRegistry {
     }
 }
 
+#[cfg(test)]
+#[cfg(test)]
 mod test;
