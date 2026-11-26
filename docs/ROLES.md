@@ -98,8 +98,10 @@ for what works while the vault is paused, and the
 | `stream_count` | Anyone | View. |
 | `pending_accrual` | Anyone | View. |
 | `depletion_time` | Anyone | View. |
+| `preview_stream` | Anyone | View. Estimates duration, token fee and validation errors before creation. |
 | `pending_payout` | Anyone | View. |
 | `pending_refund` | Anyone | View. |
+| `preview_stream` | Anyone | View. Estimates duration, token fee and validation errors before creation. |
 | `paused` | Anyone | View. |
 | `get_config` | Anyone | View. |
 | `treasury` | Anyone | View. |

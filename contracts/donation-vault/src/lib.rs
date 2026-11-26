@@ -541,6 +541,26 @@ pub struct ActiveStreamsPage {
     pub next: u32,
 }
 
+/// A read-only estimate of a new stream, returned by `preview_stream`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPreview {
+    /// Whole seconds `deposit` will take to stream at `rate`, rounded up so a
+    /// partial final second counts. `None` when `deposit` or `rate` is not
+    /// positive, or when the result does not fit in a `u64`.
+    pub duration: Option<u64>,
+    /// The fee in basis points that applies to `token`: its per-token
+    /// override if one is configured, otherwise the global fee. Matches
+    /// `token_fee_bps`.
+    pub fee_bps: u32,
+    /// The numeric code of the first error `create_stream` would return for
+    /// the checks that only depend on `token`, `deposit` and `rate`
+    /// (including the pause gate and configured limits), or `None` when those
+    /// checks pass. Donor-, NGO-, auth- and registry-specific checks are
+    /// outside the preview.
+    pub error: Option<u32>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
@@ -1209,6 +1229,52 @@ fn depletes_before_min_duration(balance: i128, rate: i128, min_duration: u64) ->
     }
 }
 
+/// The token / deposit / rate checks shared by `create_stream_inner` and
+/// `preview_stream`. Keeping them in one place means the preview cannot
+/// drift from the real creation call for these inputs.
+fn validate_stream_token_and_amount(
+    env: &Env,
+    token: &Address,
+    deposit: i128,
+    rate: i128,
+) -> Result<(), Error> {
+    // The vault is not a token contract, so the deposit could never move.
+    if token == &env.current_contract_address() {
+        return Err(Error::InvalidToken);
+    }
+    if deposit <= 0 || rate <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    Ok(())
+}
+
+/// The admin-configured limits shared by `create_stream_inner` and
+/// `preview_stream`: minimum deposit, maximum rate, maximum per-stream
+/// deposit, and minimum duration.
+fn validate_stream_config_limits(env: &Env, deposit: i128, rate: i128) -> Result<(), Error> {
+    if deposit < DonationVault::min_deposit(env.clone()) {
+        return Err(Error::DepositTooLow);
+    }
+
+    if let Some(max_rate) = max_rate_cap(env) {
+        if rate > max_rate {
+            return Err(Error::RateTooHigh);
+        }
+    }
+
+    if let Some(max_dep) = max_deposit_per_stream_cap(env) {
+        if deposit > max_dep {
+            return Err(Error::DepositTooHigh);
+        }
+    }
+
+    if depletes_before_min_duration(deposit, rate, min_duration_seconds(env)) {
+        return Err(Error::StreamTooShort);
+    }
+
+    Ok(())
+}
+
 fn record_outflow_totals(env: &Env, gross: i128, fee: i128) -> Result<(), Error> {
     if gross > 0 {
         let withdrawn: i128 = env
@@ -1403,13 +1469,8 @@ fn create_stream_inner(
     if ngo == vault {
         return Err(Error::InvalidNgo);
     }
-    if token == vault {
-        return Err(Error::InvalidToken);
-    }
 
-    if deposit <= 0 || rate <= 0 {
-        return Err(Error::InvalidAmount);
-    }
+    validate_stream_token_and_amount(&env, &token, deposit, rate)?;
 
     // The cliff, if any, may sit up to `MAX_START_DELAY_SECONDS` ahead of now
     // (issue #337). Anything further is treated as a mistyped date so a deposit
@@ -1428,33 +1489,11 @@ fn create_stream_inner(
         return Err(Error::MemoTooLong);
     }
 
-    if deposit < DonationVault::min_deposit(env.clone()) {
-        return Err(Error::DepositTooLow);
-    }
-
-    // Optional per-second ceiling (issue #339): a rate above the
-    // admin-configured maximum is rejected before any funds move.
-    if let Some(max_rate) = max_rate_cap(&env) {
-        if rate > max_rate {
-            return Err(Error::RateTooHigh);
-        }
-    }
-
-    // Optional per-stream deposit ceiling: a deposit above the
-    // admin-configured maximum is rejected before any funds move.
-    if let Some(max_dep) = max_deposit_per_stream_cap(&env) {
-        if deposit > max_dep {
-            return Err(Error::DepositTooHigh);
-        }
-    }
-
-    // Optional minimum lifespan (issue #340): a deposit that would drain in
-    // fewer than `min_duration` seconds is almost always a mistyped rate, so
-    // it is rejected before any funds move. Distinct from `DepositTooLow`
-    // (deposit size alone) and `InvalidAmount` (zero/negative).
-    if depletes_before_min_duration(deposit, rate, min_duration_seconds(&env)) {
-        return Err(Error::StreamTooShort);
-    }
+    // Admin-configured limits: minimum deposit (issue #76), per-second rate
+    // ceiling (issue #339), per-stream deposit ceiling, and minimum lifespan
+    // (issue #340). Shared with `preview_stream` so the two can never disagree
+    // on these checks.
+    validate_stream_config_limits(&env, deposit, rate)?;
 
     // Per-donor stream cap (issue #94). Read before the token transfer
     // so a rejected donor is rejected without moving funds.
@@ -3259,6 +3298,53 @@ impl DonationVault {
         env.storage()
             .persistent()
             .get(&DataKey::NgoPayoutAddress(ngo))
+    }
+
+    /// Previews a new stream before it is created: how long `deposit` will
+    /// last at `rate`, the fee in basis points that applies to `token`, and
+    /// the first validation error `create_stream` would return for those
+    /// parameters.
+    ///
+    /// This is a read-only view: it never pulls funds, writes storage, or
+    /// requires auth. It reuses the same token/deposit/rate and configured
+    /// limit checks as `create_stream`, so a non-`None` `error` is exactly
+    /// what the real call would fail with for those inputs. Donor-, NGO-,
+    /// auth- and registry-specific checks are outside the preview because
+    /// they depend on arguments this view does not take.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, ());
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// let token = Address::generate(&env);
+    /// let preview = client.preview_stream(&token, &1_000, &10);
+    /// assert_eq!(preview.duration, Some(100));
+    /// assert_eq!(preview.error, None);
+    /// ```
+    pub fn preview_stream(env: Env, token: Address, deposit: i128, rate: i128) -> StreamPreview {
+        let fee_bps = effective_fee_bps(&env, &token);
+        let duration = if deposit > 0 {
+            math::seconds_to_deplete(rate, deposit)
+        } else {
+            None
+        };
+
+        let error = require_not_paused(&env)
+            .err()
+            .or_else(|| validate_stream_token_and_amount(&env, &token, deposit, rate).err())
+            .or_else(|| validate_stream_config_limits(&env, deposit, rate).err())
+            .map(|error| error as u32);
+
+        StreamPreview {
+            duration,
+            fee_bps,
+            error,
+        }
     }
 
     /// Opens a new stream: pulls `deposit` of `token` from the donor into the

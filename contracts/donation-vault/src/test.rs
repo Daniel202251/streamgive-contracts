@@ -3936,6 +3936,408 @@ fn status_is_queryable_after_cancel_then_further_operations_fail() {
 }
 
 #[test]
+fn preview_stream_reports_duration_and_token_fee_without_mutating_state() {
+    let s = setup();
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    s.client.set_fee_bps(&500); // 5% global
+    s.client.set_token_fee_bps(&s.token.address, &100); // 1% for this token
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+
+    assert_eq!(preview.duration, Some(100));
+    assert_eq!(preview.fee_bps, 100);
+    assert_eq!(preview.error, None);
+
+    // A token with no override falls back to the global fee.
+    let other_token = Address::generate(&s.env);
+    assert_eq!(
+        s.client.preview_stream(&other_token, &1_000, &10).fee_bps,
+        500
+    );
+
+    // The view is read-only: no auth, no stream, no funds moved.
+    assert!(s.env.auths().is_empty());
+    assert_eq!(s.client.stream_count(), 0);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+
+    // And its duration agrees with the stream once it is actually created.
+    s.token_admin.mint(&s.donor, &1_000);
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    let created_at = s.client.get_stream(&stream_id).created_at;
+    assert_eq!(s.client.depletion_time(&stream_id), Some(created_at + 100));
+}
+
+#[test]
+fn preview_stream_matches_create_stream_for_token_and_amount_errors() {
+    let s = setup();
+
+    let cases = [
+        (s.token.address.clone(), 0i128, 10i128, Error::InvalidAmount),
+        (
+            s.token.address.clone(),
+            1_000i128,
+            0i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.token.address.clone(),
+            -1i128,
+            10i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.token.address.clone(),
+            1_000i128,
+            -1i128,
+            Error::InvalidAmount,
+        ),
+        (
+            s.client.address.clone(),
+            1_000i128,
+            10i128,
+            Error::InvalidToken,
+        ),
+    ];
+
+    for (token, deposit, rate, expected) in cases {
+        let preview = s.client.preview_stream(&token, &deposit, &rate);
+        assert_eq!(
+            preview.error,
+            Some(expected as u32),
+            "preview for deposit={deposit} rate={rate}"
+        );
+
+        let created = s
+            .client
+            .try_create_stream(&s.donor, &s.ngo, &token, &deposit, &rate);
+        assert_eq!(
+            created,
+            Err(Ok(expected)),
+            "create_stream for deposit={deposit} rate={rate}"
+        );
+    }
+
+    // A non-positive amount has no meaningful depletion time.
+    assert_eq!(
+        s.client.preview_stream(&s.token.address, &0, &10).duration,
+        None
+    );
+    assert_eq!(
+        s.client
+            .preview_stream(&s.token.address, &1_000, &0)
+            .duration,
+        None
+    );
+}
+
+#[test]
+fn preview_stream_matches_create_stream_for_configured_limits() {
+    let s = setup();
+
+    s.client.set_min_deposit(&500);
+    let preview = s.client.preview_stream(&s.token.address, &100, &10);
+    assert_eq!(preview.error, Some(Error::DepositTooLow as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &100, &10),
+        Err(Ok(Error::DepositTooLow))
+    );
+
+    s.client.set_max_rate(&5);
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::RateTooHigh as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::RateTooHigh))
+    );
+
+    s.client.clear_max_rate();
+    s.client.set_min_duration(&101);
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::StreamTooShort as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::StreamTooShort))
+    );
+}
+
+#[test]
+fn preview_stream_matches_create_stream_when_paused() {
+    let s = setup();
+    s.client.pause();
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &10);
+    assert_eq!(preview.error, Some(Error::ContractPaused as u32));
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::ContractPaused))
+    );
+}
+
+#[test]
+fn preview_stream_rounds_a_partial_final_second_up() {
+    let s = setup();
+
+    let preview = s.client.preview_stream(&s.token.address, &1_000, &300);
+
+    assert_eq!(preview.duration, Some(4));
+    assert_eq!(preview.error, None);
+}
+
+#[test]
+fn max_deposit_per_stream_is_none_by_default() {
+    let s = setup();
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+}
+
+#[test]
+fn set_max_deposit_per_stream_stores_value_and_emits_event() {
+    let s = setup();
+
+    s.client.set_max_deposit_per_stream(&5_000);
+
+    // Read the event before the getters, which start a new event log.
+    assert_last_event(&s.env, (symbol_short!("maxdep"),), 5_000i128);
+
+    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
+    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(5_000));
+}
+
+#[test]
+fn set_max_deposit_per_stream_rejects_zero_and_negative() {
+    let s = setup();
+
+    assert_eq!(
+        s.client.try_set_max_deposit_per_stream(&0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        s.client.try_set_max_deposit_per_stream(&-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    // No ceiling should have been stored.
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn clear_max_deposit_per_stream_removes_ceiling_and_emits_event() {
+    let s = setup();
+
+    s.client.set_max_deposit_per_stream(&5_000);
+    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
+
+    s.client.clear_max_deposit_per_stream();
+    // Read the event before the getter, which starts a new event log.
+    assert_last_event(&s.env, (symbol_short!("maxdepclr"),), ());
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn clear_max_deposit_per_stream_is_noop_when_not_set() {
+    let s = setup();
+    // Should not panic and should return Ok.
+    s.client.clear_max_deposit_per_stream();
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn create_stream_accepts_deposit_exactly_at_ceiling() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    // Exactly at the ceiling ΓÇö must succeed.
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn create_stream_rejects_deposit_above_ceiling() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&999);
+
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::DepositTooHigh))
+    );
+    // No funds should have moved.
+    assert_eq!(s.token.balance(&s.donor), 2_000);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+#[test]
+fn create_stream_accepts_any_deposit_when_ceiling_is_cleared() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &10_000);
+
+    s.client.set_max_deposit_per_stream(&500);
+    // Confirm the ceiling is active.
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::DepositTooHigh))
+    );
+
+    // Remove the ceiling; the same deposit should now succeed.
+    s.client.clear_max_deposit_per_stream();
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn top_up_accepts_amount_that_keeps_balance_at_ceiling() {
+    let s = setup();
+    // Deposit 500, ceiling 1_000 ΓÇö a 500 top-up should land exactly on the ceiling.
+    s.token_admin.mint(&s.donor, &1_500);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    // No time passes, so balance is still 500. A 500 top-up brings it to 1_000.
+    s.client.top_up(&stream_id, &500);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn top_up_rejects_amount_that_exceeds_ceiling_after_settlement() {
+    let s = setup();
+    // Deposit 500, ceiling 1_000. After 100 seconds at rate 1, 100 accrues,
+    // leaving balance = 400. A top-up of 601 would push balance to 1_001.
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues
+
+    // Post-settlement balance will be 400; 601 would exceed the ceiling.
+    assert_eq!(
+        s.client.try_top_up(&stream_id, &601),
+        Err(Ok(Error::DepositTooHigh))
+    );
+    // Balance and donor funds must be unchanged (top_up is a no-op on error).
+    assert_eq!(s.client.get_stream(&stream_id).balance, 500);
+    assert_eq!(s.token.balance(&s.donor), 1_500);
+}
+
+#[test]
+fn top_up_accepts_amount_exactly_at_ceiling_after_settlement() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues, settled on top_up
+
+    // After settlement balance = 400; a top-up of exactly 600 brings it to 1_000.
+    s.client.top_up(&stream_id, &600);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn get_config_reflects_max_deposit_per_stream_when_set_and_cleared() {
+    let s = setup();
+
+    // Not set yet.
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+
+    s.client.set_max_deposit_per_stream(&7_777);
+    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(7_777));
+
+    s.client.clear_max_deposit_per_stream();
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+}
+
+#[test]
+fn set_max_deposit_per_stream_requires_admin() {
+    let s = setup();
+    // Read the admin before the call: `admin()` is itself a contract call and
+    // would start a new auth log, hiding the authorizer we want to inspect.
+    let admin = s.client.admin();
+    // mock_all_auths is active, so we probe via the recorded auth instead of
+    // bypassing it. The call must succeed and require the admin's authorisation.
+    s.client.set_max_deposit_per_stream(&1_000);
+    assert_auth_required_from(&s, &admin, "set_max_deposit_per_stream");
+}
+
+#[test]
+fn clear_max_deposit_per_stream_requires_admin() {
+    let s = setup();
+    let admin = s.client.admin();
+    s.client.set_max_deposit_per_stream(&1_000);
+    s.client.clear_max_deposit_per_stream();
+    assert_auth_required_from(&s, &admin, "clear_max_deposit_per_stream");
+}
+
+/// Moves the ledger clock forward by `secs`.
+fn advance(env: &Env, secs: u64) {
+    env.ledger().with_mut(|l| l.timestamp += secs);
+}
+
+#[test]
+fn payable_amount_before_during_and_after_a_pause() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // Before: 30s at 10/s is payable.
+    advance(&s.env, 30);
+    assert_eq!(s.client.pending_accrual(&stream_id), 300);
+
+    // Pausing settles what was owed straight to the NGO.
+    assert_eq!(s.client.pause_stream(&stream_id), 300);
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 700);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // During: nothing becomes payable however long the pause lasts.
+    for secs in [1, 49, 50] {
+        advance(&s.env, secs);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        assert_eq!(s.client.pending_payout(&stream_id), (0, 0));
+    }
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.token.balance(&s.client.address), 700);
+
+    // After: accrual restarts from the resume time, not the pause time.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 20);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+
+    assert_eq!(s.client.withdraw(&stream_id), 200);
+    assert_eq!(s.token.balance(&s.ngo), 500);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.balance, 500);
+    assert_eq!(stream.withdrawn, 500);
+    assert_eq!(s.token.balance(&s.client.address), 500);
+}
+
+#[test]
 fn stream_status_state_machine_walks_each_transition() {
     #[derive(Clone, Copy)]
     enum Step {

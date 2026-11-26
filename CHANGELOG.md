@@ -16,6 +16,10 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Added
 
+- `donation-vault`: read-only `preview_stream` view returning the estimated
+  stream duration, the effective fee, and the first validation error before a
+  stream is created. Shares its token/amount and configured-limit checks with
+  `create_stream`, so the preview cannot drift (#438).
 - `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
 
 ### Added
