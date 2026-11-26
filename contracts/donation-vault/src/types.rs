@@ -1,4 +1,6 @@
-use soroban_sdk::{contractclient, contracterror, contracttype, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::{
+    contractclient, contracterror, contracttype, Address, Bytes, BytesN, Env, String, Vec,
+};
 
 /// A contract upgrade recorded by `propose_upgrade`, awaiting the timelock
 /// before `execute_upgrade` may carry it out. See issue #343.

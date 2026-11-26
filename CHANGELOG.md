@@ -20,6 +20,13 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Added
 
+- `donation-vault`, `ngo-registry`: configure `[workspace.lints]` with
+  `rustc::missing_docs = warn` and `clippy::all = warn`; opt both contract
+  crates in via `[lints] workspace = true`. Add crate-level doc comments and
+  document all previously undocumented public items; annotate self-evident
+  `#[contractevent]` fields with `#[allow(missing_docs)]` to avoid boilerplate
+  prose.
+
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
   several streams in one transaction, with one authorization and one refund
   per stream. Rejects foreign or already-cancelled streams and is
