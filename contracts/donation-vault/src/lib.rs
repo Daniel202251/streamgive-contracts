@@ -376,10 +376,7 @@ pub struct NgoRecord {
     pub name: String,
     /// Whether the NGO has been verified in the registry.
     pub verified: bool,
-    /// Optional off-chain metadata link maintained by the registry (issue #347).
     pub metadata_uri: Option<String>,
-    /// Ledger timestamp at which verification lapses, maintained by the
-    /// registry (issue #348).
     pub verified_until: Option<u64>,
 }
 
