@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(test)]
 
+mod tests;
 use super::*;
+use common::{DAY_IN_LEDGERS, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD};
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, Events as _, Ledger, MockAuth, MockAuthInvoke,
@@ -47,7 +49,8 @@ fn assert_last_event<T: IntoVal<Env, Val>, D: IntoVal<Env, Val>>(env: &Env, topi
 /// last one (issue #344).
 fn count_events_with_topic(env: &Env, topic0: Symbol) -> u32 {
     let all = env.events().all();
-    let expected = ScVal::try_from_val(env, &topic0.to_val()).unwrap();
+    let topic0: Val = topic0.into_val(env);
+    let expected = ScVal::try_from_val(env, &topic0).unwrap();
     all.events()
         .iter()
         .filter(|event| {
@@ -1273,6 +1276,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -1303,6 +1307,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -4377,9 +4382,14 @@ fn streams_by_ngo_pages_follow_the_compacted_index_after_transfers() {
     assert_eq!(cursor.next, next + tail.len());
 
     assert_eq!(
-        s.client
-            .streams_by_ngo(&other_ngo, &0, &MAX_STREAMS_BY_NGO),
-        Vec::from_array(&s.env, [ids.get(2).unwrap(), ids.get(MAX_STREAMS_BY_NGO + 1).unwrap()])
+        s.client.streams_by_ngo(&other_ngo, &0, &MAX_STREAMS_BY_NGO),
+        Vec::from_array(
+            &s.env,
+            [
+                ids.get(2).unwrap(),
+                ids.get(MAX_STREAMS_BY_NGO + 1).unwrap()
+            ]
+        )
     );
 }
 
@@ -6670,7 +6680,20 @@ fn set_registry_publishes_event() {
 
     s.client.set_registry(&registry);
 
-    assert_last_event(&s.env, (symbol_short!("regset"),), registry.clone());
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (registry.clone(), None::<Address>),
+    );
+
+    let replacement = Address::generate(&s.env);
+    s.client.set_registry(&replacement);
+
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (replacement, Some(registry)),
+    );
 }
 
 #[test]
@@ -7058,6 +7081,59 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
+
+// =============================================================================
+// Property tests for fee calculation invariants (Issue 1)
+// =============================================================================
+
+#[cfg(test)]
+mod proptest_fee_invariants {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Property test: fee + net always equals accrued for any rate, elapsed time,
+    /// and fee settings, and no value is negative.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn fee_plus_net_equals_accrued(
+            rate in 1i128..=1_000_000i128,
+            elapsed in 1u64..=86_400u64,
+            balance in 1_000i128..=1_000_000_000i128,
+            fee_bps in 0u32..=1_000u32,
+        ) {
+            let s = setup();
+            s.token_admin.mint(&s.donor, &balance);
+
+            let treasury = Address::generate(&s.env);
+            s.client.set_treasury(&treasury);
+            s.client.set_fee_bps(&fee_bps);
+
+            let stream_id = s
+                .client
+                .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
+
+            s.env.ledger().with_mut(|l| l.timestamp += elapsed);
+
+            let accrued = s.client.pending_accrual(&stream_id);
+            let net = s.client.withdraw(&stream_id);
+            let fee_balance = s.token.balance(&treasury);
+
+            // Core invariant: fee + net == accrued
+            prop_assert_eq!(fee_balance + net, accrued);
+
+            // No value should be negative
+            prop_assert!(fee_balance >= 0);
+            prop_assert!(net >= 0);
+            prop_assert!(accrued >= 0);
+
+            // Net should never exceed accrued
+            prop_assert!(net <= accrued);
+        }
+    }
+}
+
 // =============================================================================
 // Tests for accrual after very long elapsed times (Issue 2)
 // =============================================================================
@@ -7085,10 +7161,13 @@ fn accrual_with_max_elapsed_and_large_rate_never_overflows() {
     let balance: i128 = 10_000_000_000;
     s.token_admin.mint(&s.donor, &balance);
 
-    let rate = i128::MAX / 2;
-    let stream_id = s
-        .client
-        .create_stream(&s.donor, &s.ngo, &s.token.address, &balance, &rate);
+    let stream_id = s.client.create_stream(
+        &s.donor,
+        &s.ngo,
+        &s.token.address,
+        &balance,
+        &(i128::MAX / 2),
+    );
 
     // Advance time to u64::MAX
     s.env.ledger().with_mut(|l| l.timestamp += u64::MAX);
@@ -7163,4 +7242,324 @@ fn streams_by_donor_handles_default_cap() {
     // streams_by_donor should successfully return all 100 streams
     let streams = s.client.streams_by_donor(&s.donor);
     assert_eq!(streams.len(), 100);
+}
+
+// ── resume_stream edge cases (issue #449) ──────────────────────────────────
+
+/// A fresh 1_000-deposit, 10/s stream created at ledger time 0.
+fn resume_fixture(s: &Setup<'_>) -> u64 {
+// =============================================================================
+// Accrual stops while a stream is paused (issue #450)
+// =============================================================================
+
+/// Moves the ledger clock forward by `secs`.
+fn advance(env: &Env, secs: u64) {
+    env.ledger().with_mut(|l| l.timestamp += secs);
+}
+
+/// A 1_000-token stream at 10/s, so every amount in the pause tests below is
+/// `10 * seconds` and easy to check by eye.
+fn paused_test_stream(s: &Setup) -> u64 {
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10)
+}
+
+#[test]
+fn resume_stream_on_a_paused_stream_reactivates_it_without_accruing_paused_time() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    assert_eq!(s.client.pause_stream(&stream_id), 100);
+
+    // 500 seconds pass while paused: none of it may accrue.
+    s.env.ledger().with_mut(|l| l.timestamp += 500);
+    s.client.resume_stream(&stream_id);
+    assert_eq!(
+        count_events_with_topic(&s.env, Symbol::new(&s.env, "strmresume")),
+        1
+    );
+
+    let resumed = s.client.get_stream(&stream_id);
+    assert_eq!(resumed.status, StreamStatus::Active);
+    assert_eq!(resumed.balance, 900);
+    assert_eq!(resumed.last_update, 510);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 20);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+}
+
+#[test]
+fn resume_stream_on_an_active_stream_fails_with_not_paused() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    let before = s.client.get_stream(&stream_id);
+
+    assert_eq!(
+        s.client.try_resume_stream(&stream_id),
+        Err(Ok(Error::StreamNotPaused))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+}
+
+#[test]
+fn resume_stream_on_a_drained_stream_fails_with_not_paused() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+    s.env.ledger().with_mut(|l| l.timestamp += 100);
+    s.client.withdraw(&stream_id);
+    assert_eq!(
+        s.client.get_stream(&stream_id).status,
+        StreamStatus::Drained
+    );
+    let before = s.client.get_stream(&stream_id);
+
+    assert_eq!(
+        s.client.try_resume_stream(&stream_id),
+        Err(Ok(Error::StreamNotPaused))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+}
+
+#[test]
+fn resume_stream_on_a_cancelled_stream_fails_with_cancelled() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+
+    // Cancelled from the paused state, the one a resume would otherwise accept.
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    s.client.pause_stream(&stream_id);
+    s.client.cancel_stream(&stream_id);
+    let before = s.client.get_stream(&stream_id);
+
+    assert_eq!(
+        s.client.try_resume_stream(&stream_id),
+        Err(Ok(Error::StreamCancelled))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+}
+
+#[test]
+fn resume_stream_on_an_unknown_stream_fails_with_not_found() {
+    let s = setup();
+    assert_eq!(
+        s.client.try_resume_stream(&999),
+        Err(Ok(Error::StreamNotFound))
+    );
+}
+
+#[test]
+fn resume_stream_while_the_vault_is_paused_is_blocked_until_unpause() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    s.client.pause_stream(&stream_id);
+    let before = s.client.get_stream(&stream_id);
+
+    s.client.pause();
+    assert_eq!(
+        s.client.try_resume_stream(&stream_id),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(s.client.get_stream(&stream_id), before);
+
+    s.client.unpause();
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
+}
+
+#[test]
+fn resume_stream_with_a_future_start_keeps_the_cliff() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let start = 2_000;
+fn payable_amount_before_during_and_after_a_pause() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // Before: 30s at 10/s is payable.
+    advance(&s.env, 30);
+    assert_eq!(s.client.pending_accrual(&stream_id), 300);
+
+    // Pausing settles what was owed straight to the NGO.
+    assert_eq!(s.client.pause_stream(&stream_id), 300);
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 700);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // During: nothing becomes payable however long the pause lasts.
+    for secs in [1, 49, 50] {
+        advance(&s.env, secs);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        assert_eq!(s.client.pending_payout(&stream_id), (0, 0));
+    }
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.token.balance(&s.client.address), 700);
+
+    // After: accrual restarts from the resume time, not the pause time.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 20);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+
+    assert_eq!(s.client.withdraw(&stream_id), 200);
+    assert_eq!(s.token.balance(&s.ngo), 500);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.balance, 500);
+    assert_eq!(stream.withdrawn, 500);
+    assert_eq!(s.token.balance(&s.client.address), 500);
+}
+
+#[test]
+fn withdraw_is_rejected_while_paused_and_pays_nothing() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 10);
+    s.client.pause_stream(&stream_id);
+    advance(&s.env, 1_000);
+
+    assert_eq!(
+        s.client.try_withdraw(&stream_id),
+        Err(Ok(Error::StreamPaused))
+    );
+    assert_eq!(s.token.balance(&s.ngo), 100);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 900);
+}
+
+#[test]
+fn a_pause_longer_than_the_stream_would_last_does_not_drain_it() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    s.client.pause_stream(&stream_id);
+
+    // 10_000s at 10/s would be ten times the balance if it kept accruing.
+    advance(&s.env, 10_000);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Paused);
+    assert_eq!(stream.balance, 1_000);
+    assert_eq!(s.token.balance(&s.ngo), 0);
+
+    s.client.resume_stream(&stream_id);
+    advance(&s.env, 40);
+    assert_eq!(s.client.pending_accrual(&stream_id), 400);
+}
+
+#[test]
+fn resuming_in_the_same_second_adds_nothing() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 5);
+
+    assert_eq!(s.client.pause_stream(&stream_id), 50);
+    s.client.resume_stream(&stream_id);
+
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 950);
+    advance(&s.env, 3);
+    assert_eq!(s.client.pending_accrual(&stream_id), 30);
+}
+
+#[test]
+fn repeated_pauses_pay_only_for_the_active_seconds() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // (active seconds, paused seconds) for three cycles: 10 + 20 + 5 = 35
+    // active seconds in total, 350 tokens.
+    for (active, paused) in [(10u64, 100u64), (20, 7), (5, 3_600)] {
+        advance(&s.env, active);
+        assert_eq!(s.client.pause_stream(&stream_id), 10 * active as i128);
+        advance(&s.env, paused);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        s.client.resume_stream(&stream_id);
+    }
+
+    assert_eq!(s.token.balance(&s.ngo), 350);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 650);
+    assert_eq!(s.client.get_stream(&stream_id).withdrawn, 350);
+    assert_eq!(s.token.balance(&s.client.address), 650);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+}
+
+#[test]
+fn a_cliff_stream_paused_before_its_start_accrues_from_the_resume_time() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let start = s.env.ledger().timestamp() + 100;
+    let stream_id =
+        s.client
+            .create_stream_with_start(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &start);
+
+    // Pause and resume while the cliff is still ahead: nothing is paid out.
+    s.env.ledger().with_mut(|l| l.timestamp = 1_200);
+    assert_eq!(s.client.pause_stream(&stream_id), 0);
+    s.env.ledger().with_mut(|l| l.timestamp = 1_400);
+    s.client.resume_stream(&stream_id);
+
+    let resumed = s.client.get_stream(&stream_id);
+    assert_eq!(resumed.status, StreamStatus::Active);
+    assert_eq!(resumed.balance, 1_000);
+    assert_eq!(resumed.start, start);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // Still before the cliff after resuming; accrual begins only at `start`.
+    s.env.ledger().with_mut(|l| l.timestamp = 1_900);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    s.env.ledger().with_mut(|l| l.timestamp = 2_050);
+    assert_eq!(s.client.pending_accrual(&stream_id), 500);
+}
+
+#[test]
+fn resume_stream_requires_the_donors_auth() {
+    let s = setup();
+    let stream_id = resume_fixture(&s);
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    s.client.pause_stream(&stream_id);
+
+    // Only an unrelated account authorises the call: the donor's auth is missing.
+    let attacker = Address::generate(&s.env);
+    s.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(s.client.try_resume_stream(&stream_id).is_err());
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Paused);
+
+    // The donor's own auth is accepted, and is the one the contract asks for.
+    s.env.mock_auths(&[MockAuth {
+        address: &s.donor,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "resume_stream",
+            args: (stream_id,).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    }]);
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.env.auths()[0].0, s.donor);
+    assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pause_stream(&stream_id), 0);
+
+    // Sit paused until well after the cliff would have passed.
+    s.env.ledger().with_mut(|l| l.timestamp = start + 50);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // The cliff is behind us, so only time after the resume counts.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pending_accrual(&stream_id), 100);
+    assert_eq!(s.client.withdraw(&stream_id), 100);
+    assert_eq!(s.token.balance(&s.ngo), 100);
 }
