@@ -649,6 +649,20 @@ much of it accrues to the NGO per second (see [`math::accrued`](../contracts/don
 `MAX_MEMO_BYTES` (32) bytes and empty when none was supplied (#341). It is a
 short label only — never truncate or reinterpret it.
 
+### `memoset`
+
+Emitted by `set_memo` when a donor replaces a stream's memo (#441).
+
+| | |
+|---|---|
+| Topics | `("memoset", stream_id: u64)` |
+| Data | `(old_memo: Bytes, new_memo: Bytes)` |
+
+Both values are carried so an indexer can update its copy without having
+retained the previous memo. `new_memo` is empty when the donor cleared the
+tag, and never exceeds `MAX_MEMO_BYTES` (32) bytes; a longer one is rejected
+with `MemoTooLong` and nothing is written.
+
 ### `withdraw`
 
 Emitted by `withdraw` when an NGO claims everything accrued on a stream

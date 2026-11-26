@@ -8008,3 +8008,87 @@ mod proptest_committed_balance {
         }
     }
 }
+
+#[test]
+fn set_memo_updates_the_stream_and_emits_old_and_new_memo() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let old_memo = Bytes::from_array(&s.env, b"campaign-42");
+    let stream_id = s.client.create_stream_with_memo(
+        &s.donor,
+        &s.ngo,
+        &s.token.address,
+        &1_000,
+        &10,
+        &old_memo,
+    );
+
+    let new_memo = Bytes::from_array(&s.env, b"campaign-43");
+    s.client.set_memo(&stream_id, &new_memo);
+
+    // The record carries the new memo...
+    assert_eq!(s.client.get_stream(&stream_id).memo, new_memo);
+    // ...and the event reports both values so an indexer can follow the change.
+    assert_eq!(
+        last_event(&s.env),
+        (
+            (symbol_short!("memoset"), stream_id).into_val(&s.env),
+            (old_memo.clone(), new_memo.clone()).into_val(&s.env),
+        )
+    );
+
+    // An empty memo clears the tag, and is reported as the new value.
+    let empty = Bytes::new(&s.env);
+    s.client.set_memo(&stream_id, &empty);
+    assert_eq!(s.client.get_stream(&stream_id).memo, empty);
+    assert_eq!(
+        last_event(&s.env),
+        (
+            (symbol_short!("memoset"), stream_id).into_val(&s.env),
+            (new_memo, empty).into_val(&s.env),
+        )
+    );
+}
+
+#[test]
+fn set_memo_rejects_an_oversized_memo() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+
+    // Exactly `MAX_MEMO_BYTES` is accepted.
+    let max_memo = Bytes::from_slice(&s.env, &[7u8; MAX_MEMO_BYTES as usize]);
+    s.client.set_memo(&stream_id, &max_memo);
+    assert_eq!(s.client.get_stream(&stream_id).memo, max_memo);
+
+    // One byte over the cap is rejected and the stored memo is unchanged.
+    let too_long = Bytes::from_slice(&s.env, &[0u8; MAX_MEMO_BYTES as usize + 1]);
+    assert_eq!(
+        s.client.try_set_memo(&stream_id, &too_long),
+        Err(Ok(Error::MemoTooLong))
+    );
+    assert_eq!(s.client.get_stream(&stream_id).memo, max_memo);
+}
+
+#[test]
+fn set_memo_rejects_a_cancelled_stream() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let memo = Bytes::from_array(&s.env, b"campaign-42");
+    let stream_id =
+        s.client
+            .create_stream_with_memo(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &memo);
+    s.client.cancel_stream(&stream_id);
+
+    let renamed = Bytes::from_array(&s.env, b"campaign-43");
+    assert_eq!(
+        s.client.try_set_memo(&stream_id, &renamed),
+        Err(Ok(Error::StreamCancelled))
+    );
+    assert_eq!(s.client.get_stream(&stream_id).memo, memo);
+}

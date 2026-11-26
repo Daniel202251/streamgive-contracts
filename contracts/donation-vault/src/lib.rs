@@ -101,6 +101,17 @@ pub struct DrainedEvent {
     pub total_paid: i128,
 }
 
+/// Emitted by `set_memo` when a donor replaces a stream's tag (issue #441).
+/// Carries both values so an indexer can update its copy without keeping the
+/// old memo itself.
+#[contractevent(topics = ["memoset"], data_format = "vec")]
+pub struct MemoSetEvent {
+    #[topic]
+    pub stream_id: u64,
+    pub old_memo: Bytes,
+    pub new_memo: Bytes,
+}
+
 /// Event emitted when a stream is cancelled.
 #[contractevent(topics = ["cancel"], data_format = "vec")]
 #[allow(missing_docs)]
@@ -682,7 +693,8 @@ pub enum Error {
     /// `create_stream_with_start` was given a `start` more than
     /// `MAX_START_DELAY_SECONDS` ahead of the current ledger time.
     StartTooFar = 30,
-    /// A creation entry point was given a `memo` longer than `MAX_MEMO_BYTES`.
+    /// A creation entry point or `set_memo` was given a `memo` longer than
+    /// `MAX_MEMO_BYTES`.
     MemoTooLong = 31,
     /// `pause_stream` was called on a stream that is already paused.
     StreamAlreadyPaused = 32,
@@ -3326,6 +3338,73 @@ impl DonationVault {
 
         PausedStreamEvent { stream_id, settled }.publish(&env);
         Ok(settled)
+    }
+
+    /// Replaces the donor's tag on an existing stream (issue #441). Donor-auth
+    /// gated. Accepts any memo up to `MAX_MEMO_BYTES`, including an empty one
+    /// to clear the tag, and rejects a cancelled stream with
+    /// `Error::StreamCancelled`. Publishes the old and new memo on the
+    /// `memoset` event.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, ());
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// # let token_admin = Address::generate(&env);
+    /// # let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    /// # let token_client = token::StellarAssetClient::new(&env, &sac.address());
+    /// # let donor = Address::generate(&env);
+    /// # let ngo = Address::generate(&env);
+    /// # token_client.mint(&donor, &1_000);
+    /// let memo = Bytes::from_array(&env, b"campaign-42");
+    /// let stream_id =
+    ///     client.create_stream_with_memo(&donor, &ngo, &sac.address(), &1_000, &10, &memo);
+    ///
+    /// let renamed = Bytes::from_array(&env, b"campaign-43");
+    /// client.set_memo(&stream_id, &renamed);
+    /// assert_eq!(client.get_stream(&stream_id).memo, renamed);
+    /// ```
+    pub fn set_memo(env: Env, stream_id: u64, memo: Bytes) -> Result<(), Error> {
+        let key = DataKey::Stream(stream_id);
+        let mut stream: Stream = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::StreamNotFound)?;
+
+        stream.donor.require_auth();
+
+        if stream.cancelled {
+            return Err(Error::StreamCancelled);
+        }
+
+        // Same cap as the create entry points (issue #341): reject a memo
+        // past `MAX_MEMO_BYTES` rather than store only part of it.
+        if memo.len() > MAX_MEMO_BYTES {
+            return Err(Error::MemoTooLong);
+        }
+
+        let old_memo = stream.memo.clone();
+        stream.memo = memo.clone();
+        env.storage().persistent().set(&key, &stream);
+        extend_instance_ttl(&env);
+        extend_stream_ttl(&env, stream_id);
+
+        MemoSetEvent {
+            stream_id,
+            old_memo,
+            new_memo: memo,
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
     /// Resumes a paused stream. No time elapsed while paused is added to accrual.

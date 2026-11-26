@@ -349,7 +349,7 @@ currently allocated up to code 40. See [docs/UPGRADE_POLICY.md](docs/UPGRADE_POL
 | 28 | `StreamPaused` | `withdraw`/`withdraw_batch`/`withdraw_all` called on a stream whose donor paused it with `pause_stream`. | `withdraw`, `withdraw_batch`, `withdraw_all` |
 | 29 | `RateTooHigh` | Rate exceeds the admin-configured `max_rate`. | `create_stream`, `create_stream_with_start`, `create_stream_with_memo`, `modify_rate` |
 | 30 | `StartTooFar` | `create_stream_with_start` was given a `start` more than one year (`MAX_START_DELAY_SECONDS`) ahead of the current ledger time. | `create_stream_with_start` |
-| 31 | `MemoTooLong` | `create_stream_with_memo` was given a `memo` longer than `MAX_MEMO_BYTES` (32) bytes. | `create_stream_with_memo` |
+| 31 | `MemoTooLong` | `create_stream_with_memo` or `set_memo` was given a `memo` longer than `MAX_MEMO_BYTES` (32) bytes. | `create_stream_with_memo`, `set_memo` |
 | 32 | `StreamAlreadyPaused` | `pause_stream` called on a stream that is already paused. | `pause_stream` |
 | 33 | `StreamNotPaused` | `resume_stream` called on a stream that is not paused. | `resume_stream` |
 | 34 | `NoPendingUpgrade` | `execute_upgrade` or `cancel_upgrade` was called with no upgrade proposed. | `execute_upgrade`, `cancel_upgrade` |
