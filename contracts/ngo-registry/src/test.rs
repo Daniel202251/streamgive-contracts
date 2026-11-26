@@ -3831,3 +3831,206 @@ fn set_categories_can_be_updated_multiple_times_before_verification() {
     client.set_categories(&owner, &CATEGORY_ENVIRONMENT);
     assert_eq!(client.categories(&owner), CATEGORY_ENVIRONMENT);
 }
+
+#[test]
+fn register_duplicate_name_exact_match_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // A second registrant with the identical name must be rejected.
+    let result = client.try_register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_duplicate_name_case_folded_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // All-uppercase canonical form matches the existing name.
+    assert_eq!(
+        client.try_register(&b, &String::from_str(&env, "RED CROSS")),
+        Err(Ok(Error::NameTaken))
+    );
+    // Mixed case also matches.
+    assert_eq!(
+        client.try_register(&c, &String::from_str(&env, "rEd cRoSs")),
+        Err(Ok(Error::NameTaken))
+    );
+    // Neither registrant was stored.
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+    assert_eq!(client.try_get_ngo(&c), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_duplicate_name_trimmed_whitespace_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+
+    // Leading/trailing ASCII spaces collapse to the same canonical key.
+    let result = client.try_register(&b, &String::from_str(&env, "  Red Cross  "));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+    assert_eq!(client.try_get_ngo(&b), Err(Ok(Error::NotRegistered)));
+}
+
+#[test]
+fn register_different_names_both_succeed() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    assert_eq!(
+        client.get_ngo(&a).name,
+        String::from_str(&env, "Red Cross")
+    );
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+    assert_eq!(client.total_ngos(), 2);
+}
+
+#[test]
+fn update_name_to_taken_name_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    // B tries to rename itself to A's existing name.
+    let result = client.try_update_name(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+
+    // B's name is unchanged.
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+}
+
+#[test]
+fn update_name_to_taken_name_case_folded_fails() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.register(&b, &String::from_str(&env, "Oxfam"));
+
+    assert_eq!(
+        client.try_update_name(&b, &String::from_str(&env, "RED CROSS")),
+        Err(Ok(Error::NameTaken))
+    );
+    assert_eq!(client.get_ngo(&b).name, String::from_str(&env, "Oxfam"));
+}
+
+#[test]
+fn update_name_to_own_current_name_is_noop_no_error() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+
+    // Updating to the same name does not trigger NameTaken — it short-circuits
+    // before the uniqueness check because the name hasn't changed.
+    client.update_name(&owner, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&owner).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn unregister_frees_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.unregister(&a);
+
+    // The name is now free — a different address should be able to register it.
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn remove_ngo_frees_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.remove_ngo(&a);
+
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn reject_ngo_frees_name_so_another_can_claim_it() {
+    let (env, client, admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.reject_ngo(&admin, &a, &1);
+
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+}
+
+#[test]
+fn update_name_frees_old_name_so_another_can_claim_it() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    client.register(&a, &String::from_str(&env, "Red Cross"));
+    client.update_name(&a, &String::from_str(&env, "Red Cross UK"));
+
+    // "Red Cross" is now free — b can take it.
+    client.register(&b, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.get_ngo(&b).name,
+        String::from_str(&env, "Red Cross")
+    );
+    // a still holds "Red Cross UK".
+    assert_eq!(
+        client.get_ngo(&a).name,
+        String::from_str(&env, "Red Cross UK")
+    );
+}
+
+#[test]
+fn name_uniqueness_is_enforced_across_case_and_whitespace_together() {
+    let (env, client, _admin) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    // Register with leading space and mixed case.
+    client.register(&a, &String::from_str(&env, "  Red Cross  "));
+
+    // Exact trimmed lowercase match must still be blocked.
+    let result = client.try_register(&b, &String::from_str(&env, "red cross"));
+    assert_eq!(result, Err(Ok(Error::NameTaken)));
+}
