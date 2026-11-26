@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(test)]
 
+mod tests;
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{
@@ -1274,6 +1275,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -1304,6 +1306,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -4378,9 +4381,14 @@ fn streams_by_ngo_pages_follow_the_compacted_index_after_transfers() {
     assert_eq!(cursor.next, next + tail.len());
 
     assert_eq!(
-        s.client
-            .streams_by_ngo(&other_ngo, &0, &MAX_STREAMS_BY_NGO),
-        Vec::from_array(&s.env, [ids.get(2).unwrap(), ids.get(MAX_STREAMS_BY_NGO + 1).unwrap()])
+        s.client.streams_by_ngo(&other_ngo, &0, &MAX_STREAMS_BY_NGO),
+        Vec::from_array(
+            &s.env,
+            [
+                ids.get(2).unwrap(),
+                ids.get(MAX_STREAMS_BY_NGO + 1).unwrap()
+            ]
+        )
     );
 }
 
@@ -6671,7 +6679,20 @@ fn set_registry_publishes_event() {
 
     s.client.set_registry(&registry);
 
-    assert_last_event(&s.env, (symbol_short!("regset"),), registry.clone());
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (registry.clone(), None::<Address>),
+    );
+
+    let replacement = Address::generate(&s.env);
+    s.client.set_registry(&replacement);
+
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (replacement, Some(registry)),
+    );
 }
 
 #[test]

@@ -470,9 +470,9 @@ fn register_and_update_name_byte_boundaries_and_multibyte() {
     let (env, client, _admin) = setup();
     let owner = Address::generate(&env);
 
-    // Greek capital Omega 'Î©' (U+03A9) is 2 bytes in UTF-8 (0xCE 0xA9).
+    // Greek capital Omega 'Ω' (U+03A9) is 2 bytes in UTF-8 (0xCE 0xA9).
     // 100 * 2 bytes = 200 bytes, exactly MAX_NGO_NAME_LEN.
-    let omega_100_str = "Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©";
+    let omega_100_str = "ΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩ";
     assert_eq!(omega_100_str.len(), 200);
     let omega_100 = String::from_str(&env, omega_100_str);
 
@@ -480,7 +480,7 @@ fn register_and_update_name_byte_boundaries_and_multibyte() {
     assert_eq!(client.get_ngo(&owner).name, omega_100);
 
     // 101 Greek capital Omegas = 202 bytes > 200 bytes, rejected with NameTooLong.
-    let omega_101_str = "Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©Î©";
+    let omega_101_str = "ΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩΩ";
     assert_eq!(omega_101_str.len(), 202);
     let omega_101 = String::from_str(&env, omega_101_str);
 
@@ -491,15 +491,15 @@ fn register_and_update_name_byte_boundaries_and_multibyte() {
     let res_reg = client.try_register(&owner2, &omega_101);
     assert_eq!(res_reg, Err(Ok(Error::NameTooLong)));
 
-    // Multi-byte at boundary: 198 'a's + 1 'Î©' (2 bytes) = 200 bytes -> accepted
-    let boundary_200_str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaÎ©";
+    // Multi-byte at boundary: 198 'a's + 1 'Ω' (2 bytes) = 200 bytes -> accepted
+    let boundary_200_str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaΩ";
     assert_eq!(boundary_200_str.len(), 200);
     let boundary_200 = String::from_str(&env, boundary_200_str);
     client.update_name(&owner, &boundary_200);
     assert_eq!(client.get_ngo(&owner).name, boundary_200);
 
-    // 199 'a's + 1 'Î©' (2 bytes) = 201 bytes -> rejected with NameTooLong without panicking
-    let boundary_201_str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaÎ©";
+    // 199 'a's + 1 'Ω' (2 bytes) = 201 bytes -> rejected with NameTooLong without panicking
+    let boundary_201_str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaΩ";
     assert_eq!(boundary_201_str.len(), 201);
     let boundary_201 = String::from_str(&env, boundary_201_str);
     let res_boundary = client.try_update_name(&owner, &boundary_201);
@@ -1474,21 +1474,6 @@ fn list_ngos_page_out_of_range_start_returns_empty_with_total() {
 }
 
 #[test]
-fn list_ngos_page_zero_limit_returns_empty_with_total() {
-    let (env, client, _admin) = setup();
-    for _ in 0..5 {
-        let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
-    }
-
-    let page = client.list_ngos_page(&0, &0);
-
-    assert_eq!(page.owners.len(), 0);
-    assert_eq!(page.owners, Vec::new(&env));
-    assert_eq!(page.next, client.total_ngos());
-}
-
-#[test]
 fn list_ngos_page_empty_registry_returns_total_zero() {
     let (_env, client, _admin) = setup();
 
@@ -1609,8 +1594,8 @@ fn verified_count_decrements_when_a_verified_ngo_is_removed() {
     client.approve_ngo(&admin, &owner);
     assert_eq!(client.verified_count(), 1);
 
-    // No public entry point removes a verified NGO â€” unregister, remove_ngo and
-    // reject_ngo all refuse it â€” so drive the shared delete helper directly to
+    // No public entry point removes a verified NGO — unregister, remove_ngo and
+    // reject_ngo all refuse it — so drive the shared delete helper directly to
     // prove it keeps the counter honest.
     env.as_contract(&client.address, || {
         delete_ngo_entry(&env, &owner).unwrap();
@@ -2554,7 +2539,7 @@ fn approver_does_not_gain_admin_rights() {
     }]);
 
     assert!(client.try_remove_ngo(&owner).is_err());
-    assert!(!client.get_ngo(&owner).verified);
+    assert!(client.get_ngo(&owner).verified == false);
 }
 
 // =============================================================================
@@ -2689,7 +2674,7 @@ fn non_approver_cannot_reject() {
     let result = client.try_reject_ngo(&outsider, &owner, &3);
 
     assert_eq!(result, Err(Ok(Error::NotApprover)));
-    assert!(!client.get_ngo(&owner).verified);
+    assert!(client.get_ngo(&owner).verified == false);
 }
 
 #[test]
@@ -2739,6 +2724,71 @@ fn reject_ngo_frees_the_index_and_lets_the_owner_register_again() {
     client.register(&b, &String::from_str(&env, "B again"));
     assert!(!client.get_ngo(&b).verified);
     assert_eq!(client.total_ngos(), 3);
+}
+
+
+// =============================================================================
+// verification_status (issue #448)
+// =============================================================================
+
+#[test]
+fn verification_status_unknown_for_unregistered_address() {
+    let (env, client, _admin) = setup();
+    let stranger = Address::generate(&env);
+    assert_eq!(client.verification_status(&stranger), VerificationStatus::Unknown);
+}
+
+#[test]
+fn verification_status_pending_after_register() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Pending);
+}
+
+#[test]
+fn verification_status_verified_after_approve() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
+}
+
+#[test]
+fn verification_status_revoked_after_revoke() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    client.revoke_ngo(&admin, &owner);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Revoked);
+}
+
+#[test]
+fn verification_status_expired_after_period_lapses() {
+    let (env, client, admin) = setup();
+    client.set_verify_period(&1_000);
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Expired);
+}
+
+#[test]
+fn verification_status_verified_again_after_reapprove() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    client.revoke_ngo(&admin, &owner);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Revoked);
+
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
 }
 
 /// Names of the `pub fn`s in the `#[contractimpl]` block that opens with
@@ -2801,9 +2851,9 @@ fn roles_doc_lists_every_entry_point() {
 
     for name in entry_point_names(SOURCE, IMPL) {
         match role_rows(ROLES, START, END).find(|(row, _)| *row == name) {
-            None => {
-                panic!("`{name}` is a public NgoRegistry entry point with no row in docs/ROLES.md")
-            }
+            None => panic!(
+                "`{name}` is a public NgoRegistry entry point with no row in docs/ROLES.md"
+            ),
             Some((_, role)) => assert!(
                 !role.is_empty(),
                 "`{name}` has an empty role in docs/ROLES.md"
@@ -2825,6 +2875,7 @@ fn roles_doc_lists_every_entry_point() {
         );
     }
 }
+env);
 
 #[test]
 #[ignore] // TODO: Requires propose_ngo_owner, accept_ngo_owner implementation

@@ -159,6 +159,16 @@ pub struct MaxRateClearedEvent {
     pub data: (),
 }
 
+#[contractevent(topics = ["maxdep"], data_format = "single-value")]
+pub struct MaxDepositPerStreamSetEvent {
+    pub max_deposit: i128,
+}
+
+#[contractevent(topics = ["maxdepclr"], data_format = "single-value")]
+pub struct MaxDepositPerStreamClearedEvent {
+    pub data: (),
+}
+
 #[contractevent(topics = ["mindur"], data_format = "single-value")]
 pub struct MinDurationSetEvent {
     pub min_duration: u64,
@@ -186,9 +196,10 @@ pub struct CancelGraceLedgersSetEvent {
     pub grace_ledgers: u32,
 }
 
-#[contractevent(topics = ["regset"], data_format = "single-value")]
+#[contractevent(topics = ["regset"], data_format = "vec")]
 pub struct RegistrySetEvent {
     pub registry: Address,
+    pub previous_registry: Option<Address>,
 }
 
 #[contractevent(topics = ["regclr"], data_format = "single-value")]
@@ -262,6 +273,9 @@ pub struct PendingUpgrade {
 }
 
 mod math;
+pub mod events;
+pub mod storage;
+pub mod types;
 
 /// Mirrors ngo-registry's `Ngo` record for cross-contract calls. Declared
 /// locally rather than imported from the `ngo-registry` crate: depending on
@@ -283,7 +297,7 @@ pub struct NgoRecord {
 /// by `create_stream`, and never changes; `last_update` moves forward on
 /// every checkpoint (withdraw, cancel, top-up, or rate change).
 #[contracttype]
-// Debug and PartialEq let tests assert_eq! on a try_* call’s full
+// Debug and PartialEq let tests assert_eq! on a try_* callΓÇÖs full
 // Result<Result<Stream, _>, _> rather than unwrapping it by hand first,
 // and compare a whole stream at once instead of field by field.
 #[derive(Clone, Debug, PartialEq)]
@@ -355,6 +369,9 @@ pub struct Config {
     pub total_fees_collected: i128,
     pub pending_admin: Option<Address>,
     pub renounced: bool,
+    /// The largest deposit or top-up balance a single stream may hold, when
+    /// an admin has configured one. `None` means no ceiling is enforced.
+    pub max_deposit_per_stream: Option<i128>,
 }
 
 /// A page of results from `withdraw_all` (issue #342): the net payout for each
@@ -413,7 +430,7 @@ pub enum DataKey {
     MaxStreamsPerDonor,
     /// Count of streams a donor currently has open. Incremented on
     /// `create_stream`, never decremented (streams are cancelled, not
-    /// deleted) — so this is really a lifetime cap, not a live cap.
+    /// deleted) ΓÇö so this is really a lifetime cap, not a live cap.
     DonorStreamCount(Address),
     /// Minimum permitted stream deposit amount.
     MinDeposit,
@@ -443,6 +460,9 @@ pub enum DataKey {
     /// `modify_rate` accept. Absent (or zero) means no minimum. See
     /// `set_min_duration` and issue #340.
     MinDuration,
+    /// Optional maximum deposit (and post-top-up balance) per stream.
+    /// Absent means "no ceiling". See `set_max_deposit_per_stream`.
+    MaxDepositPerStream,
 }
 
 #[contracterror]
@@ -491,7 +511,7 @@ pub enum Error {
     /// `NextStreamId` was missing from instance storage when `create_stream`
     /// tried to read it. `init` always sets it, so this should be
     /// unreachable in practice, but a missing counter must never be
-    /// silently treated as `0` — that could collide with an existing
+    /// silently treated as `0` ΓÇö that could collide with an existing
     /// stream. Returned instead of defaulting.
     StreamCounterMissing = 19,
     /// The admin has renounced control, so admin-gated calls are permanently
@@ -559,6 +579,11 @@ pub enum Error {
     /// A batch is all-or-nothing, so a single foreign stream rejects the
     /// whole call rather than cancelling the caller's streams around it.
     NotStreamOwner = 40,
+    /// `create_stream` or `top_up` was given a deposit that would push the
+    /// stream's balance above the admin-configured `max_deposit_per_stream`.
+    /// Only raised when an admin has set a ceiling via
+    /// `set_max_deposit_per_stream`.
+    DepositTooHigh = 41,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -596,7 +621,7 @@ const DEFAULT_MAX_STREAMS_PER_DONOR: u64 = 100;
 const MAX_START_DELAY_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 /// Longest stream memo accepted by the create entry points (issue #341). A memo
-/// is a short tag (a campaign id, say), not a payload — 32 bytes is plenty and
+/// is a short tag (a campaign id, say), not a payload ΓÇö 32 bytes is plenty and
 /// keeps the stored record and `created` event small.
 const MAX_MEMO_BYTES: u32 = 32;
 
@@ -779,7 +804,7 @@ fn fee_from_payout(accrued: i128, net: i128) -> Result<i128, Error> {
 
 /// Computes `amount * fee_bps / 10_000` without an intermediate overflow.
 /// `amount * fee_bps` can exceed `i128::MAX` for a large `amount` even
-/// though `fee_bps` is capped at `MAX_FEE_BPS` (1_000) — a naive
+/// though `fee_bps` is capped at `MAX_FEE_BPS` (1_000) ΓÇö a naive
 /// `amount * fee_bps` (or a `saturating_mul` that silently clamps the
 /// overflowed product before dividing) both under-count the fee for such
 /// amounts. Splitting `amount` into a quotient/remainder around the 10_000
@@ -811,7 +836,7 @@ fn effective_fee_bps(env: &Env, token: &Address) -> u32 {
 
 /// Pays `amount` out to the NGO, skimming a protocol fee to the treasury
 /// first if one is configured. With no treasury set, the full amount goes
-/// to the NGO regardless of `fee_bps` — there's nowhere to send a fee.
+/// to the NGO regardless of `fee_bps` ΓÇö there's nowhere to send a fee.
 ///
 /// Returns the net amount actually transferred to the NGO. This is the
 /// single place the fee split is computed, so callers that report the
@@ -867,6 +892,14 @@ fn min_duration_seconds(env: &Env) -> u64 {
         .unwrap_or(0)
 }
 
+/// Returns the admin-configured maximum balance a single stream may hold
+/// (at creation or after a top-up), if any. `None` (the default) means no
+/// ceiling is enforced, so the checks in `create_stream_inner` and `top_up`
+/// are skipped entirely.
+fn max_deposit_per_stream_cap(env: &Env) -> Option<i128> {
+    env.storage().instance().get(&DataKey::MaxDepositPerStream)
+}
+
 /// Returns true when a stream holding `balance` at a per-second `rate` would
 /// deplete in fewer than `min_duration` seconds. A `min_duration` of `0`
 /// disables the check.
@@ -918,7 +951,7 @@ fn record_outflow_totals(env: &Env, gross: i128, fee: i128) -> Result<(), Error>
 
 /// The timestamp a stream's accrual is measured from: the later of its last
 /// checkpoint and its `start`. Until `start` arrives this is `start` itself,
-/// so `now - base` is zero and nothing accrues — the cliff — even though
+/// so `now - base` is zero and nothing accrues ΓÇö the cliff ΓÇö even though
 /// `last_update` may have been checkpointed earlier. See issue #337.
 fn accrual_base(stream: &Stream) -> u64 {
     stream.last_update.max(stream.start)
@@ -1025,7 +1058,7 @@ fn cancel_stream_inner(
     }
 
     // Only emit the cancel event when something actually moved. When both
-    // values are zero the stream was already cancelled — emitting here would
+    // values are zero the stream was already cancelled ΓÇö emitting here would
     // produce a duplicate that an indexer can't distinguish from a real
     // cancellation (see issue #91).
     if accrued > 0 || refund > 0 {
@@ -1044,8 +1077,8 @@ fn cancel_stream_inner(
 /// and `create_stream_with_memo`: validates the arguments, records the stream,
 /// and pulls the deposit into the vault.
 ///
-/// `start` is the cliff timestamp — the ledger time before which nothing
-/// accrues — or `None` for a stream that begins accruing immediately, in which
+/// `start` is the cliff timestamp ΓÇö the ledger time before which nothing
+/// accrues ΓÇö or `None` for a stream that begins accruing immediately, in which
 /// case it defaults to the current ledger time (issue #337). `memo` is the
 /// donor's optional tag, empty when none was supplied (issue #341).
 #[allow(clippy::too_many_arguments)]
@@ -1111,6 +1144,14 @@ fn create_stream_inner(
     if let Some(max_rate) = max_rate_cap(&env) {
         if rate > max_rate {
             return Err(Error::RateTooHigh);
+        }
+    }
+
+    // Optional per-stream deposit ceiling: a deposit above the
+    // admin-configured maximum is rejected before any funds move.
+    if let Some(max_dep) = max_deposit_per_stream_cap(&env) {
+        if deposit > max_dep {
+            return Err(Error::DepositTooHigh);
         }
     }
 
@@ -1660,7 +1701,7 @@ impl DonationVault {
         ids
     }
 
-    /// Reads back the number of streams ever created — the exclusive upper
+    /// Reads back the number of streams ever created ΓÇö the exclusive upper
     /// bound on valid stream ids.
     ///
     /// # Examples
@@ -1715,7 +1756,7 @@ impl DonationVault {
     /// env.ledger().with_mut(|l| l.timestamp += 50);
     ///
     /// assert_eq!(client.pending_accrual(&stream_id), 500);
-    /// // Balance is untouched — pending_accrual doesn't pay out.
+    /// // Balance is untouched ΓÇö pending_accrual doesn't pay out.
     /// assert_eq!(client.get_stream(&stream_id).balance, 1_000);
     /// ```
     pub fn pending_accrual(env: Env, stream_id: u64) -> Result<i128, Error> {
@@ -1735,7 +1776,7 @@ impl DonationVault {
     /// in one place. The stream's `balance` counts everything not yet paid
     /// out (including what's accrued but unwithdrawn) and `last_update` is
     /// when it was last settled, so this is `last_update` plus the seconds
-    /// `balance` takes at `rate`, rounded up — a partial final second counts
+    /// `balance` takes at `rate`, rounded up ΓÇö a partial final second counts
     /// as a whole one.
     ///
     /// Returns `None` when the stream will never deplete: a cancelled or
@@ -2015,7 +2056,8 @@ impl DonationVault {
     /// Reads back all admin-set configuration and contract state parameters in one call:
     /// `paused`, `treasury`, `fee_bps`, `min_deposit`, `max_streams_per_donor`,
     /// `max_rate`, `min_duration`, `registry`, `cancel_grace_ledgers`, `total_donated`,
-    /// `total_withdrawn`, `total_fees_collected`, `pending_admin`, and `renounced`.
+    /// `total_withdrawn`, `total_fees_collected`, `pending_admin`, `renounced`, and
+    /// `max_deposit_per_stream`.
     pub fn get_config(env: Env) -> Config {
         Config {
             paused: env
@@ -2064,6 +2106,7 @@ impl DonationVault {
                 .instance()
                 .get(&DataKey::AdminRenounced)
                 .unwrap_or(false),
+            max_deposit_per_stream: max_deposit_per_stream_cap(&env),
         }
     }
 
@@ -2550,6 +2593,67 @@ impl DonationVault {
         max_rate_cap(&env)
     }
 
+    /// Sets an optional ceiling on how large a single stream's balance may
+    /// be, in token units. Admin-gated. `create_stream` rejects an initial
+    /// deposit above it, and `top_up` rejects any top-up whose amount would
+    /// push the post-settlement balance above it, both with
+    /// `Error::DepositTooHigh`.
+    ///
+    /// This is off by default: until an admin calls it, stream balances are
+    /// uncapped. Setting a ceiling lets an operator limit exposure during
+    /// an early launch without preventing ordinary-sized donations.
+    /// `max_deposit` must be positive; to remove the ceiling use
+    /// `clear_max_deposit_per_stream`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, DonationVaultArgs::__constructor(&Address::generate(&env)));
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// client.set_max_deposit_per_stream(&10_000);
+    /// assert_eq!(client.max_deposit_per_stream(), Some(10_000));
+    /// ```
+    pub fn set_max_deposit_per_stream(env: Env, max_deposit: i128) -> Result<(), Error> {
+        require_admin(&env)?;
+        if max_deposit <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxDepositPerStream, &max_deposit);
+        extend_instance_ttl(&env);
+
+        MaxDepositPerStreamSetEvent { max_deposit }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Removes the per-stream deposit ceiling so `create_stream` and `top_up`
+    /// accept any positive amount. Admin-gated. Emits a `maxdepclr` event.
+    ///
+    /// If no ceiling was set this is a clean no-op returning `Ok(())`.
+    pub fn clear_max_deposit_per_stream(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .remove(&DataKey::MaxDepositPerStream);
+        extend_instance_ttl(&env);
+
+        MaxDepositPerStreamClearedEvent { data: () }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Reads back the configured maximum balance per stream, if any. `None`
+    /// until an admin sets one. See `set_max_deposit_per_stream`.
+    pub fn max_deposit_per_stream(env: Env) -> Option<i128> {
+        max_deposit_per_stream_cap(&env)
+    }
+
     /// Sets the shortest allowed time to depletion, in seconds. Admin-gated.
     /// `create_stream` and `modify_rate` reject a stream whose deposit would
     /// drain in fewer than this many seconds with `Error::StreamTooShort`.
@@ -2615,10 +2719,15 @@ impl DonationVault {
     /// ```
     pub fn set_registry(env: Env, registry: Address) -> Result<(), Error> {
         require_admin(&env)?;
+        let previous_registry = env.storage().instance().get(&DataKey::Registry);
         env.storage().instance().set(&DataKey::Registry, &registry);
         extend_instance_ttl(&env);
 
-        RegistrySetEvent { registry }.publish(&env);
+        RegistrySetEvent {
+            registry,
+            previous_registry,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -2629,7 +2738,7 @@ impl DonationVault {
     /// # Trade-off
     ///
     /// Clearing the registry turns off NGO verification for all new streams opened
-    /// while the registry is unset — any recipient address (as long as it differs from
+    /// while the registry is unset ΓÇö any recipient address (as long as it differs from
     /// the donor) will be accepted. Use `set_registry` to configure a new registry.
     ///
     /// If no registry was set, this is an idempotent no-op (mirroring `clear_treasury`),
@@ -2772,13 +2881,13 @@ impl DonationVault {
     /// let stream_id = client.create_stream(&donor, &ngo, &sac.address(), &1_000, &10);
     /// assert_eq!(client.get_stream(&stream_id).balance, 1_000);
     ///
-    /// // A stream needs two distinct parties — the vault refuses to pay a
+    /// // A stream needs two distinct parties ΓÇö the vault refuses to pay a
     /// // donor back their own deposit.
     /// let result = client.try_create_stream(&donor, &donor, &sac.address(), &1_000, &10);
     /// assert_eq!(result, Err(Ok(Error::SelfStream)));
     /// ```
     ///
-    /// Begins accruing immediately, at the current ledger time — equivalent to
+    /// Begins accruing immediately, at the current ledger time ΓÇö equivalent to
     /// `create_stream_with_start` with `start` equal to now. Use
     /// `create_stream_with_start` instead to hold a stream behind a cliff
     /// (issue #337).
@@ -2813,8 +2922,8 @@ impl DonationVault {
     /// rather than from creation. Cancelling before `start` refunds the whole
     /// deposit, because nothing has accrued.
     ///
-    /// `start` may be at or before the current ledger time — the stream then
-    /// behaves exactly like `create_stream` — but not more than
+    /// `start` may be at or before the current ledger time ΓÇö the stream then
+    /// behaves exactly like `create_stream` ΓÇö but not more than
     /// `MAX_START_DELAY_SECONDS` (one year) ahead of it; a further timestamp is
     /// rejected with `Error::StartTooFar` so a mistyped cliff can't strand the
     /// deposit. Every other check in `create_stream` applies unchanged.
@@ -2872,7 +2981,7 @@ impl DonationVault {
 
     /// Creates a stream that begins accruing immediately, tagged with an
     /// optional `memo` (issue #341). Use this to attach a short label to a
-    /// stream — a campaign id, an invoice reference — that callers can read
+    /// stream ΓÇö a campaign id, an invoice reference ΓÇö that callers can read
     /// back from `get_stream` and from the `created` event.
     ///
     /// The memo is capped at `MAX_MEMO_BYTES` (32) bytes; a longer one is
@@ -3622,7 +3731,7 @@ impl DonationVault {
     /// Admin-only emergency escape hatch for a paused vault (issue #199).
     ///
     /// Unlike `cancel_stream`, this does not settle any accrued amount to
-    /// the NGO first — a pause is an incident response, not a normal
+    /// the NGO first ΓÇö a pause is an incident response, not a normal
     /// wind-down, and the point is to get the donor's funds out with as
     /// little contract logic in the way as possible. The full remaining
     /// `balance` refunds to the donor, and the stream is marked cancelled
@@ -3786,6 +3895,18 @@ impl DonationVault {
         let now = env.ledger().timestamp();
         let settled = settle_core(&env, &mut stream, now)?;
 
+        // Optional per-stream deposit ceiling: reject the top-up if it would
+        // push the stream's post-settlement balance above the configured cap.
+        if let Some(max_dep) = max_deposit_per_stream_cap(&env) {
+            let new_balance = stream
+                .balance
+                .checked_add(amount)
+                .ok_or(Error::ArithmeticOverflow)?;
+            if new_balance > max_dep {
+                return Err(Error::DepositTooHigh);
+            }
+        }
+
         // Update state before the external token transfer
         stream.balance = stream
             .balance
@@ -3832,9 +3953,9 @@ impl DonationVault {
 
     /// Changes the per-second accrual rate on an existing stream. Donor-auth-gated.
     /// Settles whatever has already accrued at the old rate first, so the new
-    /// rate only ever applies going forward — never retroactively. Fails
+    /// rate only ever applies going forward ΓÇö never retroactively. Fails
     /// with `Error::StreamCancelled` if `cancel_stream` has already closed
-    /// the stream out — otherwise this would quietly revive it.
+    /// the stream out ΓÇö otherwise this would quietly revive it.
     ///
     /// If an NGO registry is configured, a rate *increase* re-verifies the
     /// stream's NGO, the same check `top_up` and `transfer_stream` apply,
@@ -3898,8 +4019,8 @@ impl DonationVault {
             return Ok(());
         }
 
-        // A rate increase sends more to the NGO, so — like `top_up` and
-        // `transfer_stream` — it requires the NGO to still be verified when
+        // A rate increase sends more to the NGO, so ΓÇö like `top_up` and
+        // `transfer_stream` ΓÇö it requires the NGO to still be verified when
         // a registry is configured. A decrease only reduces what flows to
         // the NGO, so it stays available even after a revocation.
         if new_rate > stream.rate {
@@ -3909,7 +4030,7 @@ impl DonationVault {
         // Optional minimum lifespan (issue #340): the stream must still last
         // at least `min_duration` seconds at the new rate. Checked against the
         // remaining balance before settling, so a rejection leaves the stream
-        // — and its funds — exactly as they were.
+        // ΓÇö and its funds ΓÇö exactly as they were.
         if depletes_before_min_duration(stream.balance, new_rate, min_duration_seconds(&env)) {
             return Err(Error::StreamTooShort);
         }
@@ -4029,7 +4150,7 @@ impl DonationVault {
     }
 
     /// Reads how much of `token` the vault holds *above* its committed
-    /// balance — the surplus `sweep_surplus` is allowed to move. A token sent
+    /// balance ΓÇö the surplus `sweep_surplus` is allowed to move. A token sent
     /// to the vault by mistake surfaces here. See issue #346.
     pub fn surplus(env: Env, token: Address) -> i128 {
         let held = token::Client::new(&env, &token).balance(&env.current_contract_address());
