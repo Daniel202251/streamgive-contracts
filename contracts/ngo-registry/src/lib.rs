@@ -135,6 +135,29 @@ pub struct Ngo {
     pub verified_until: Option<u64>,
 }
 
+/// The verification state of an NGO owner address, returned by `verification_status`.
+///
+/// Distinguishes the five cases that `is_verified` collapses into a single
+/// `false`: an address that was never registered (`Unknown`), one that is
+/// registered but not yet reviewed (`Pending`), one that is currently
+/// verified and not expired (`Verified`), one whose verification period has
+/// lapsed (`Expired`), and one whose approval was explicitly revoked
+/// (`Revoked`). See issue #448.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VerificationStatus {
+    /// No entry exists for this address.
+    Unknown,
+    /// Registered but not yet approved or rejected.
+    Pending,
+    /// Approved and the verification has not expired.
+    Verified,
+    /// Was approved but the `verified_until` timestamp has passed.
+    Expired,
+    /// Approval was explicitly revoked by an admin or approver.
+    Revoked,
+}
+
 /// A single page of the NGO owners index, returned by `list_ngos_page`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -172,6 +195,10 @@ pub enum DataKey {
     /// Current number of verified NGO records, maintained by the review and
     /// removal entry points and read by `verified_count`.
     VerifiedCount,
+    /// Set when an NGO's approval is explicitly revoked. Cleared on
+    /// re-approval. Used by `verification_status` to distinguish `Revoked`
+    /// from `Pending`. See issue #448.
+    NgoRevoked(Address),
     /// The verification period in seconds applied to new approvals and to
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
@@ -484,6 +511,11 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
         )
     };
     env.storage().persistent().set(&key, &ngo);
+    // Clear any prior revocation flag so `verification_status` returns
+    // `Verified` rather than `Revoked` after a re-approval. See issue #448.
+    env.storage()
+        .persistent()
+        .remove(&DataKey::NgoRevoked(ngo_owner.clone()));
 
     let verified = get_verified_count(env);
     let new_verified = verified.checked_add(1).ok_or(Error::ArithmeticOverflow)?;
@@ -1460,6 +1492,63 @@ impl NgoRegistry {
             .unwrap_or(false)
     }
 
+    /// Returns the detailed verification state of `owner`, distinguishing the
+    /// five cases that `is_verified` collapses into a single `false`:
+    /// `Unknown` (no entry), `Pending` (registered, not yet reviewed),
+    /// `Verified` (approved and not expired), `Expired` (approved but
+    /// `verified_until` has passed), and `Revoked` (approval was explicitly
+    /// revoked). Never errors or panics. See issue #448.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, VerificationStatus};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let owner = Address::generate(&env);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Unknown);
+    ///
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Pending);
+    ///
+    /// client.approve_ngo(&admin, &owner);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
+    /// ```
+    pub fn verification_status(env: Env, owner: Address) -> VerificationStatus {
+        let ngo: Ngo = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ngo(owner.clone()))
+        {
+            Some(n) => n,
+            None => return VerificationStatus::Unknown,
+        };
+
+        if ngo.verified {
+            if has_expired(&env, ngo.verified_until) {
+                return VerificationStatus::Expired;
+            }
+            return VerificationStatus::Verified;
+        }
+
+        // verified == false: distinguish Revoked from Pending via the flag
+        // set by revoke_ngo and cleared by approve_registered_ngo.
+        let revoked: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NgoRevoked(owner))
+            .unwrap_or(false);
+        if revoked {
+            VerificationStatus::Revoked
+        } else {
+            VerificationStatus::Pending
+        }
+    }
+
     /// Reads back the total number of registered NGOs.
     ///
     /// Lets callers (such as the impact page) display the total count
@@ -1695,6 +1784,11 @@ impl NgoRegistry {
         // doesn't carry a stale timestamp (#348).
         ngo.verified_until = None;
         env.storage().persistent().set(&key, &ngo);
+        // Mark as revoked so `verification_status` can distinguish this from
+        // a pending (never-approved) entry. See issue #448.
+        env.storage()
+            .persistent()
+            .set(&DataKey::NgoRevoked(ngo_owner.clone()), &true);
 
         let verified = get_verified_count(&env);
         let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
