@@ -1435,6 +1435,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -1465,6 +1466,7 @@ fn get_config_reflects_admin_settings() {
             total_fees_collected: 0,
             pending_admin: None,
             renounced: false,
+            max_deposit_per_stream: None,
         }
     );
 
@@ -6858,7 +6860,20 @@ fn set_registry_publishes_event() {
 
     s.client.set_registry(&registry);
 
-    assert_last_event(&s.env, (symbol_short!("regset"),), registry.clone());
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (registry.clone(), None::<Address>),
+    );
+
+    let replacement = Address::generate(&s.env);
+    s.client.set_registry(&replacement);
+
+    assert_last_event(
+        &s.env,
+        (symbol_short!("regset"),),
+        (replacement, Some(registry)),
+    );
 }
 
 #[test]
@@ -7420,4 +7435,212 @@ fn streams_by_donor_handles_default_cap() {
     // streams_by_donor should successfully return all 100 streams
     let streams = s.client.streams_by_donor(&s.donor);
     assert_eq!(streams.len(), 100);
+}
+
+// =============================================================================
+// max_deposit_per_stream tests
+// =============================================================================
+
+#[test]
+fn max_deposit_per_stream_is_none_by_default() {
+    let s = setup();
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+}
+
+#[test]
+fn set_max_deposit_per_stream_stores_value_and_emits_event() {
+    let s = setup();
+
+    s.client.set_max_deposit_per_stream(&5_000);
+
+    // Read the event before the getters, which start a new event log.
+    assert_last_event(&s.env, (symbol_short!("maxdep"),), 5_000i128);
+
+    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
+    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(5_000));
+}
+
+#[test]
+fn set_max_deposit_per_stream_rejects_zero_and_negative() {
+    let s = setup();
+
+    assert_eq!(
+        s.client.try_set_max_deposit_per_stream(&0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        s.client.try_set_max_deposit_per_stream(&-1),
+        Err(Ok(Error::InvalidAmount))
+    );
+    // No ceiling should have been stored.
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn clear_max_deposit_per_stream_removes_ceiling_and_emits_event() {
+    let s = setup();
+
+    s.client.set_max_deposit_per_stream(&5_000);
+    assert_eq!(s.client.max_deposit_per_stream(), Some(5_000));
+
+    s.client.clear_max_deposit_per_stream();
+    // Read the event before the getter, which starts a new event log.
+    assert_last_event(&s.env, (symbol_short!("maxdepclr"),), ());
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn clear_max_deposit_per_stream_is_noop_when_not_set() {
+    let s = setup();
+    // Should not panic and should return Ok.
+    s.client.clear_max_deposit_per_stream();
+    assert_eq!(s.client.max_deposit_per_stream(), None);
+}
+
+#[test]
+fn create_stream_accepts_deposit_exactly_at_ceiling() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    // Exactly at the ceiling — must succeed.
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn create_stream_rejects_deposit_above_ceiling() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&999);
+
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::DepositTooHigh))
+    );
+    // No funds should have moved.
+    assert_eq!(s.token.balance(&s.donor), 2_000);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
+
+#[test]
+fn create_stream_accepts_any_deposit_when_ceiling_is_cleared() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &10_000);
+
+    s.client.set_max_deposit_per_stream(&500);
+    // Confirm the ceiling is active.
+    assert_eq!(
+        s.client
+            .try_create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10),
+        Err(Ok(Error::DepositTooHigh))
+    );
+
+    // Remove the ceiling; the same deposit should now succeed.
+    s.client.clear_max_deposit_per_stream();
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn top_up_accepts_amount_that_keeps_balance_at_ceiling() {
+    let s = setup();
+    // Deposit 500, ceiling 1_000 — a 500 top-up should land exactly on the ceiling.
+    s.token_admin.mint(&s.donor, &1_500);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    // No time passes, so balance is still 500. A 500 top-up brings it to 1_000.
+    s.client.top_up(&stream_id, &500);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn top_up_rejects_amount_that_exceeds_ceiling_after_settlement() {
+    let s = setup();
+    // Deposit 500, ceiling 1_000. After 100 seconds at rate 1, 100 accrues,
+    // leaving balance = 400. A top-up of 601 would push balance to 1_001.
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues
+
+    // Post-settlement balance will be 400; 601 would exceed the ceiling.
+    assert_eq!(
+        s.client.try_top_up(&stream_id, &601),
+        Err(Ok(Error::DepositTooHigh))
+    );
+    // Balance and donor funds must be unchanged (top_up is a no-op on error).
+    assert_eq!(s.client.get_stream(&stream_id).balance, 500);
+    assert_eq!(s.token.balance(&s.donor), 1_500);
+}
+
+#[test]
+fn top_up_accepts_amount_exactly_at_ceiling_after_settlement() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &2_000);
+
+    s.client.set_max_deposit_per_stream(&1_000);
+
+    let stream_id = s
+        .client
+        .create_stream(&s.donor, &s.ngo, &s.token.address, &500, &1);
+
+    s.env.ledger().with_mut(|l| l.timestamp += 100); // 100 accrues, settled on top_up
+
+    // After settlement balance = 400; a top-up of exactly 600 brings it to 1_000.
+    s.client.top_up(&stream_id, &600);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 1_000);
+}
+
+#[test]
+fn get_config_reflects_max_deposit_per_stream_when_set_and_cleared() {
+    let s = setup();
+
+    // Not set yet.
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+
+    s.client.set_max_deposit_per_stream(&7_777);
+    assert_eq!(s.client.get_config().max_deposit_per_stream, Some(7_777));
+
+    s.client.clear_max_deposit_per_stream();
+    assert_eq!(s.client.get_config().max_deposit_per_stream, None);
+}
+
+#[test]
+fn set_max_deposit_per_stream_requires_admin() {
+    let s = setup();
+    // Read the admin before the call: `admin()` is itself a contract call and
+    // would start a new auth log, hiding the authorizer we want to inspect.
+    let admin = s.client.admin();
+    // mock_all_auths is active, so we probe via the recorded auth instead of
+    // bypassing it. The call must succeed and require the admin's authorisation.
+    s.client.set_max_deposit_per_stream(&1_000);
+    assert_auth_required_from(&s, &admin, "set_max_deposit_per_stream");
+}
+
+#[test]
+fn clear_max_deposit_per_stream_requires_admin() {
+    let s = setup();
+    let admin = s.client.admin();
+    s.client.set_max_deposit_per_stream(&1_000);
+    s.client.clear_max_deposit_per_stream();
+    assert_auth_required_from(&s, &admin, "clear_max_deposit_per_stream");
 }

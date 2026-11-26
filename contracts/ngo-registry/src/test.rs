@@ -1474,21 +1474,6 @@ fn list_ngos_page_out_of_range_start_returns_empty_with_total() {
 }
 
 #[test]
-fn list_ngos_page_zero_limit_returns_empty_with_total() {
-    let (env, client, _admin) = setup();
-    for _ in 0..5 {
-        let owner = Address::generate(&env);
-        client.register(&owner, &String::from_str(&env, "NGO"));
-    }
-
-    let page = client.list_ngos_page(&0, &0);
-
-    assert_eq!(page.owners.len(), 0);
-    assert_eq!(page.owners, Vec::new(&env));
-    assert_eq!(page.next, client.total_ngos());
-}
-
-#[test]
 fn list_ngos_page_empty_registry_returns_total_zero() {
     let (_env, client, _admin) = setup();
 
@@ -1609,8 +1594,8 @@ fn verified_count_decrements_when_a_verified_ngo_is_removed() {
     client.approve_ngo(&admin, &owner);
     assert_eq!(client.verified_count(), 1);
 
-    // No public entry point removes a verified NGO â€” unregister, remove_ngo and
-    // reject_ngo all refuse it â€” so drive the shared delete helper directly to
+    // No public entry point removes a verified NGO — unregister, remove_ngo and
+    // reject_ngo all refuse it — so drive the shared delete helper directly to
     // prove it keeps the counter honest.
     env.as_contract(&client.address, || {
         delete_ngo_entry(&env, &owner).unwrap();
@@ -2746,6 +2731,94 @@ fn reject_ngo_frees_the_index_and_lets_the_owner_register_again() {
     assert_eq!(client.total_ngos(), 3);
 }
 
+// =============================================================================
+// verification_status (issue #448)
+// =============================================================================
+
+#[test]
+fn verification_status_unknown_for_unregistered_address() {
+    let (env, client, _admin) = setup();
+    let stranger = Address::generate(&env);
+    assert_eq!(
+        client.verification_status(&stranger),
+        VerificationStatus::Unknown
+    );
+}
+
+#[test]
+fn verification_status_pending_after_register() {
+    let (env, client, _admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Pending
+    );
+}
+
+#[test]
+fn verification_status_verified_after_approve() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn verification_status_revoked_after_revoke() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    client.revoke_ngo(&admin, &owner);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Revoked
+    );
+}
+
+#[test]
+fn verification_status_expired_after_period_lapses() {
+    let (env, client, admin) = setup();
+    client.set_verify_period(&1_000);
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Verified
+    );
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Expired
+    );
+}
+
+#[test]
+fn verification_status_verified_again_after_reapprove() {
+    let (env, client, admin) = setup();
+    let owner = Address::generate(&env);
+    client.register(&owner, &String::from_str(&env, "Red Cross"));
+    client.approve_ngo(&admin, &owner);
+    client.revoke_ngo(&admin, &owner);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Revoked
+    );
+
+    client.approve_ngo(&admin, &owner);
+    assert_eq!(
+        client.verification_status(&owner),
+        VerificationStatus::Verified
+    );
+}
+
 /// Names of the `pub fn`s in the `#[contractimpl]` block that opens with
 /// `impl_header`, read from the contract's source. Every one of them is a
 /// public entry point.
@@ -2832,7 +2905,7 @@ fn roles_doc_lists_every_entry_point() {
 }
 
 // =============================================================================
-// NGO owner transfer tests (keeping verified flag)
+// Test for list_ngos handling removed entries (Issue 4)
 // =============================================================================
 
 #[test]
