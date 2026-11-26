@@ -16,17 +16,18 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Added
 
-- `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
 - `donation-vault`: read-only `preview_stream` view returning the estimated
   stream duration, the effective fee, and the first validation error before a
   stream is created. Shares its token/amount and configured-limit checks with
   `create_stream`, so the preview cannot drift (#438).
-- `donation-vault`, `ngo-registry`: configure `[workspace.lints]` with
-  `rustc::missing_docs = warn` and `clippy::all = warn`; opt both contract
-  crates in via `[lints] workspace = true`. Add crate-level doc comments and
-  document all previously undocumented public items; annotate self-evident
-  `#[contractevent]` fields with `#[allow(missing_docs)]` to avoid boilerplate
-  prose.
+- `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
+
+### Added
+
+- `ngo-registry`: admin-gated `pause_registrations` / `resume_registrations`
+  switch and `registrations_paused` view to block new `register` calls with
+  `Error::RegistrationsPaused` (code 16) while keeping all other entry points
+  operational. Emits `regrpause` and `regresume` events.
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
   several streams in one transaction, with one authorization and one refund
   per stream. Rejects foreign or already-cancelled streams and is
@@ -73,6 +74,9 @@ This project does not yet follow a formal versioning scheme — each contract's
 - `donation-vault`: tests that nothing accrues while a stream is paused and that
   accrual restarts from the resume time. `pending_accrual` and `pending_payout`
   now return zero for a paused stream, matching what `settle` pays.
+- `donation-vault`: `pause_stream` now returns `Error::StreamDrained` (43) for a
+  drained stream and `Error::StreamEmpty` (44) for an empty one instead of
+  `StreamCancelled`, which is kept for real cancellations only.
 - `donation-vault`: regression coverage for one-stroop-per-second streams and
   their zero-rounded protocol fee.
 - `DataKey` enums now derive `Debug` in both contracts for clearer storage-key
@@ -184,6 +188,10 @@ This project does not yet follow a formal versioning scheme — each contract's
   addresses alongside `next`, the index to resume from, so clients can page
   through the registry without recomputing the cursor and can tell the final
   page from a full one. `list_ngos` is unchanged (#351).
+- `ngo-registry`: `owner_by_name(name)` looks up an NGO's owner address by its
+  exact name through an index kept in sync on `register`, `update_name`,
+  `unregister`, `remove_ngo` and `reject_ngo`. Entries registered before this
+  change are not indexed until they rename (#447).
 - `ngo-registry`: `verified_count()` getter so dashboards can read the number of
   verified NGOs without listing the registry. The count is backed by a
   `DataKey::VerifiedCount` instance key kept in step by every transition:
@@ -218,9 +226,24 @@ This project does not yet follow a formal versioning scheme — each contract's
   balance (the sum of its streams' `balance`) before `sweep_surplus` is used, or
   the whole token balance would read as sweepable surplus. No such deployment
   exists yet, so no migration entry point is added.
+- `donation-vault`: admin-gated `sweep_surplus_to(token, amount, destination)`
+  recovers misplaced tokens to an explicit address without requiring a
+  configured treasury. It applies the same committed-balance ceiling as
+  `sweep_surplus`, rejects the vault itself with
+  `Error::InvalidSweepDestination` (code 40), and emits `sweep` naming the
+  destination (#439).
+- `donation-vault`: read-only `active_streams_by_ngo(ngo, start, limit)` pages
+  through an NGO's live streams only, skipping `Cancelled` and `Drained` ones.
+  It returns an `ActiveStreamsPage` with the ids plus the `next` position to
+  continue from, so callers can enumerate open positions without fetching
+  finished streams (#440).
 
 ### Changed
 
+- `donation-vault`: the `sweep` event's final data field is now named
+  `destination` instead of `treasury`, since `sweep_surplus_to` can send the
+  surplus anywhere. Positional XDR encoding is unchanged, so existing indexers
+  keep decoding it (#439).
 - **BREAKING** `ngo-registry`: `approve_ngo`, `batch_approve`, and `revoke_ngo`
   now take the acting address as a leading argument
   (`approve_ngo(approver: Address, ngo_owner: Address)`,
