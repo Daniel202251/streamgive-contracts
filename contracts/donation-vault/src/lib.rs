@@ -159,6 +159,16 @@ pub struct MaxRateClearedEvent {
     pub data: (),
 }
 
+#[contractevent(topics = ["maxdep"], data_format = "single-value")]
+pub struct MaxDepositPerStreamSetEvent {
+    pub max_deposit: i128,
+}
+
+#[contractevent(topics = ["maxdepclr"], data_format = "single-value")]
+pub struct MaxDepositPerStreamClearedEvent {
+    pub data: (),
+}
+
 #[contractevent(topics = ["mindur"], data_format = "single-value")]
 pub struct MinDurationSetEvent {
     pub min_duration: u64,
@@ -359,6 +369,9 @@ pub struct Config {
     pub total_fees_collected: i128,
     pub pending_admin: Option<Address>,
     pub renounced: bool,
+    /// The largest deposit or top-up balance a single stream may hold, when
+    /// an admin has configured one. `None` means no ceiling is enforced.
+    pub max_deposit_per_stream: Option<i128>,
 }
 
 /// A page of results from `withdraw_all` (issue #342): the net payout for each
@@ -447,6 +460,9 @@ pub enum DataKey {
     /// `modify_rate` accept. Absent (or zero) means no minimum. See
     /// `set_min_duration` and issue #340.
     MinDuration,
+    /// Optional maximum deposit (and post-top-up balance) per stream.
+    /// Absent means "no ceiling". See `set_max_deposit_per_stream`.
+    MaxDepositPerStream,
 }
 
 #[contracterror]
@@ -563,6 +579,11 @@ pub enum Error {
     /// A batch is all-or-nothing, so a single foreign stream rejects the
     /// whole call rather than cancelling the caller's streams around it.
     NotStreamOwner = 40,
+    /// `create_stream` or `top_up` was given a deposit that would push the
+    /// stream's balance above the admin-configured `max_deposit_per_stream`.
+    /// Only raised when an admin has set a ceiling via
+    /// `set_max_deposit_per_stream`.
+    DepositTooHigh = 41,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -871,6 +892,14 @@ fn min_duration_seconds(env: &Env) -> u64 {
         .unwrap_or(0)
 }
 
+/// Returns the admin-configured maximum balance a single stream may hold
+/// (at creation or after a top-up), if any. `None` (the default) means no
+/// ceiling is enforced, so the checks in `create_stream_inner` and `top_up`
+/// are skipped entirely.
+fn max_deposit_per_stream_cap(env: &Env) -> Option<i128> {
+    env.storage().instance().get(&DataKey::MaxDepositPerStream)
+}
+
 /// Returns true when a stream holding `balance` at a per-second `rate` would
 /// deplete in fewer than `min_duration` seconds. A `min_duration` of `0`
 /// disables the check.
@@ -1115,6 +1144,14 @@ fn create_stream_inner(
     if let Some(max_rate) = max_rate_cap(&env) {
         if rate > max_rate {
             return Err(Error::RateTooHigh);
+        }
+    }
+
+    // Optional per-stream deposit ceiling: a deposit above the
+    // admin-configured maximum is rejected before any funds move.
+    if let Some(max_dep) = max_deposit_per_stream_cap(&env) {
+        if deposit > max_dep {
+            return Err(Error::DepositTooHigh);
         }
     }
 
@@ -2019,7 +2056,8 @@ impl DonationVault {
     /// Reads back all admin-set configuration and contract state parameters in one call:
     /// `paused`, `treasury`, `fee_bps`, `min_deposit`, `max_streams_per_donor`,
     /// `max_rate`, `min_duration`, `registry`, `cancel_grace_ledgers`, `total_donated`,
-    /// `total_withdrawn`, `total_fees_collected`, `pending_admin`, and `renounced`.
+    /// `total_withdrawn`, `total_fees_collected`, `pending_admin`, `renounced`, and
+    /// `max_deposit_per_stream`.
     pub fn get_config(env: Env) -> Config {
         Config {
             paused: env
@@ -2068,6 +2106,7 @@ impl DonationVault {
                 .instance()
                 .get(&DataKey::AdminRenounced)
                 .unwrap_or(false),
+            max_deposit_per_stream: max_deposit_per_stream_cap(&env),
         }
     }
 
@@ -2552,6 +2591,67 @@ impl DonationVault {
     /// until an admin sets one. See `set_max_rate`.
     pub fn max_rate(env: Env) -> Option<i128> {
         max_rate_cap(&env)
+    }
+
+    /// Sets an optional ceiling on how large a single stream's balance may
+    /// be, in token units. Admin-gated. `create_stream` rejects an initial
+    /// deposit above it, and `top_up` rejects any top-up whose amount would
+    /// push the post-settlement balance above it, both with
+    /// `Error::DepositTooHigh`.
+    ///
+    /// This is off by default: until an admin calls it, stream balances are
+    /// uncapped. Setting a ceiling lets an operator limit exposure during
+    /// an early launch without preventing ordinary-sized donations.
+    /// `max_deposit` must be positive; to remove the ceiling use
+    /// `clear_max_deposit_per_stream`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use donation_vault::{DonationVault, DonationVaultClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(DonationVault, DonationVaultArgs::__constructor(&Address::generate(&env)));
+    /// # let client = DonationVaultClient::new(&env, &contract_id);
+    /// client.set_max_deposit_per_stream(&10_000);
+    /// assert_eq!(client.max_deposit_per_stream(), Some(10_000));
+    /// ```
+    pub fn set_max_deposit_per_stream(env: Env, max_deposit: i128) -> Result<(), Error> {
+        require_admin(&env)?;
+        if max_deposit <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxDepositPerStream, &max_deposit);
+        extend_instance_ttl(&env);
+
+        MaxDepositPerStreamSetEvent { max_deposit }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Removes the per-stream deposit ceiling so `create_stream` and `top_up`
+    /// accept any positive amount. Admin-gated. Emits a `maxdepclr` event.
+    ///
+    /// If no ceiling was set this is a clean no-op returning `Ok(())`.
+    pub fn clear_max_deposit_per_stream(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage()
+            .instance()
+            .remove(&DataKey::MaxDepositPerStream);
+        extend_instance_ttl(&env);
+
+        MaxDepositPerStreamClearedEvent { data: () }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Reads back the configured maximum balance per stream, if any. `None`
+    /// until an admin sets one. See `set_max_deposit_per_stream`.
+    pub fn max_deposit_per_stream(env: Env) -> Option<i128> {
+        max_deposit_per_stream_cap(&env)
     }
 
     /// Sets the shortest allowed time to depletion, in seconds. Admin-gated.
@@ -3778,6 +3878,18 @@ impl DonationVault {
 
         let now = env.ledger().timestamp();
         let settled = settle_core(&env, &mut stream, now)?;
+
+        // Optional per-stream deposit ceiling: reject the top-up if it would
+        // push the stream's post-settlement balance above the configured cap.
+        if let Some(max_dep) = max_deposit_per_stream_cap(&env) {
+            let new_balance = stream
+                .balance
+                .checked_add(amount)
+                .ok_or(Error::ArithmeticOverflow)?;
+            if new_balance > max_dep {
+                return Err(Error::DepositTooHigh);
+            }
+        }
 
         // Update state before the external token transfer
         stream.balance = stream
