@@ -1847,6 +1847,7 @@ impl DonationVault {
     }
 
     /// Read-only lookup of how much a stream has accrued to the NGO so far.
+    /// A paused stream reports `0`: no time passes for it until it resumes.
     ///
     /// # Examples
     ///
