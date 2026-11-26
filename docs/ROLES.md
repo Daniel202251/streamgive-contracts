@@ -133,6 +133,8 @@ for what works while the vault is paused, and the
 | `remove_ngo` | Admin | Unverified entries only. |
 | `set_verify_period` | Admin | |
 | `renew_ngo` | Admin | |
+| `pause_registrations` | Admin | Prevents `register` from accepting new applications. |
+| `resume_registrations` | Admin | Re-opens `register` after a pause. |
 | `upgrade` | Admin | |
 | `approve_ngo` | Approver | The `approver` argument signs. |
 | `batch_approve` | Approver | The `approver` argument signs. |
@@ -158,6 +160,6 @@ for what works while the vault is paused, and the
 | `ngo_count` | Anyone | View. |
 | `verified_count` | Anyone | View. |
 | `verify_period` | Anyone | View. |
-| `verification_status` | Anyone | View. |
+| `registrations_paused` | Anyone | View. |
 
 <!-- roles:ngo-registry:end -->

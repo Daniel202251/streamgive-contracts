@@ -387,6 +387,7 @@ key.
 | 13 | `AlreadyApprover` | The address is already on the approver list. | `add_approver` |
 | 14 | `MetadataUriTooLong` | The metadata URI exceeds 512 bytes. | `set_metadata_uri` |
 | 15 | `NoVerifyPeriod` | `renew_ngo` was called while no verification period is configured. | `renew_ngo` |
+| 16 | `RegistrationsPaused` | `register` was called while the admin has paused new registrations. | `register` |
 
 ## Status
 

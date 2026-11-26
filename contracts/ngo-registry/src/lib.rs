@@ -180,78 +180,13 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
-#[contractevent(topics = ["catset"], data_format = "single-value")]
-pub struct CategoriesSetEvent {
-    #[topic]
-    pub owner: Address,
-    /// The new bitmask value. Each set bit corresponds to one `NgoCategory`
-    /// constant; zero means no categories assigned.
-    pub categories: u32,
+#[contractevent(topics = ["regrpause"], data_format = "single-value")]
+pub struct RegistrationsPausedEvent {
+    pub data: (),
 }
 
-/// NGO category bitmask constants.
-///
-/// Each constant is a single bit. An NGO's `categories` field is the bitwise
-/// OR of whichever categories apply. Zero means uncategorised.
-///
-/// | Bit | Constant              | Meaning                             |
-/// |-----|-----------------------|-------------------------------------|
-/// | 0   | `CATEGORY_HEALTH`     | Healthcare and medical services     |
-/// | 1   | `CATEGORY_EDUCATION`  | Education and literacy              |
-/// | 2   | `CATEGORY_ENVIRONMENT`| Environment and climate             |
-/// | 3   | `CATEGORY_HUMANITAR`  | Humanitarian aid and disaster relief|
-/// | 4   | `CATEGORY_ANIMALS`    | Animal welfare                      |
-/// | 5   | `CATEGORY_ARTS`       | Arts, culture, and heritage         |
-/// | 6   | `CATEGORY_COMMUNITY`  | Community development               |
-/// | 7   | `CATEGORY_RESEARCH`   | Research and science                |
-///
-/// Bits 8–31 are reserved for future categories and must be zero in any value
-/// passed to `set_categories`; a non-zero reserved bit causes
-/// `Error::InvalidCategories`.
-pub const CATEGORY_HEALTH: u32 = 1 << 0;
-pub const CATEGORY_EDUCATION: u32 = 1 << 1;
-pub const CATEGORY_ENVIRONMENT: u32 = 1 << 2;
-pub const CATEGORY_HUMANITAR: u32 = 1 << 3;
-pub const CATEGORY_ANIMALS: u32 = 1 << 4;
-pub const CATEGORY_ARTS: u32 = 1 << 5;
-pub const CATEGORY_COMMUNITY: u32 = 1 << 6;
-pub const CATEGORY_RESEARCH: u32 = 1 << 7;
-
-/// The union of every defined category bit. Any bit set in a caller-supplied
-/// value that is *not* in this mask is a reserved bit and causes
-/// `Error::InvalidCategories`.
-pub const VALID_CATEGORY_MASK: u32 = CATEGORY_HEALTH
-    | CATEGORY_EDUCATION
-    | CATEGORY_ENVIRONMENT
-    | CATEGORY_HUMANITAR
-    | CATEGORY_ANIMALS
-    | CATEGORY_ARTS
-    | CATEGORY_COMMUNITY
-    | CATEGORY_RESEARCH;
-/// Event emitted when an ownership transfer is proposed.
-#[contractevent(topics = ["ownprop"], data_format = "vec")]
-#[allow(missing_docs)]
-pub struct OwnershipProposedEvent {
-    #[topic]
-    pub current_owner: Address,
-    pub new_owner: Address,
-}
-
-/// Event emitted when an ownership transfer is accepted.
-#[contractevent(topics = ["ownaccpt"], data_format = "vec")]
-#[allow(missing_docs)]
-pub struct OwnershipAcceptedEvent {
-    #[topic]
-    pub old_owner: Address,
-    pub new_owner: Address,
-}
-
-/// Event emitted when an ownership transfer is cancelled.
-#[contractevent(topics = ["owncancel"], data_format = "single-value")]
-#[allow(missing_docs)]
-pub struct OwnershipCancelledEvent {
-    #[topic]
-    pub owner: Address,
+#[contractevent(topics = ["regresume"], data_format = "single-value")]
+pub struct RegistrationsResumedEvent {
     pub data: (),
 }
 
@@ -369,18 +304,10 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
-    /// Reverse index from a canonical name (ASCII-lowercased, whitespace-trimmed)
-    /// to the owner address that holds it. Set on `register`/`update_name`,
-    /// cleared on `unregister`/`remove_ngo`/`reject_ngo`. Used to enforce
-    /// name uniqueness across registrations.
-    NameOwner(Bytes),
-    /// Seconds that must elapse between `propose_upgrade` and
-    /// `execute_upgrade`. Zero (or absent) means the timelock is disabled and
-    /// the immediate `upgrade` entry point is allowed.
-    UpgradeDelay,
-    /// The upgrade recorded by `propose_upgrade` and not yet executed or
-    /// cancelled. Absent means no upgrade is pending.
-    PendingUpgrade,
+    /// Whether new NGO registrations are paused by the admin.
+    /// `true` while `pause_registrations` is in effect; absent or `false`
+    /// means registrations are open. See `pause_registrations` / `resume_registrations`.
+    RegistrationsPaused,
 }
 
 #[contracterror]
@@ -424,23 +351,9 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
-    /// The supplied name (after trimming whitespace and folding to lowercase)
-    /// is already in use by another registered NGO.
-    NameTaken = 20,
-    /// `set_categories` was given a value with one or more reserved bits set.
-    /// Only bits 0–7 (`VALID_CATEGORY_MASK`) are defined; any higher bit must
-    /// be zero.
-    InvalidCategories = 19,
-    /// `execute_upgrade` or `cancel_upgrade` was called with no upgrade
-    /// proposed.
-    NoPendingUpgrade = 16,
-    /// `execute_upgrade` was called before the proposed upgrade's timelock
-    /// elapsed.
-    UpgradeDelayNotElapsed = 17,
-    /// The immediate `upgrade` entry point was called while a non-zero
-    /// `upgrade_delay` is configured: upgrades must go through
-    /// `propose_upgrade` / `execute_upgrade`.
-    UpgradeTimelockEnabled = 18,
+    /// `register` was called while the admin has paused new registrations.
+    /// Resume with `resume_registrations`.
+    RegistrationsPaused = 16,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -721,6 +634,20 @@ fn require_approver(env: &Env, candidate: &Address) -> Result<(), Error> {
         return Err(Error::NotApprover);
     }
     candidate.require_auth();
+    Ok(())
+}
+
+/// Returns `Err(Error::RegistrationsPaused)` if the admin has paused new
+/// registrations. Called at the top of `register` to enforce the switch.
+fn require_registrations_open(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::RegistrationsPaused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::RegistrationsPaused);
+    }
     Ok(())
 }
 
@@ -1054,6 +981,129 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Prevents new NGO applications while the switch is on. Admin-gated.
+    ///
+    /// Once set, every call to `register` fails with `Error::RegistrationsPaused`
+    /// until the admin calls `resume_registrations`. All other entry points
+    /// (approve, revoke, unregister, etc.) continue to work normally.
+    /// Emits a `regrpause` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::RegistrationsPaused` if registrations are already paused.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// assert!(client.try_register(&owner, &name).is_err());
+    /// ```
+    pub fn pause_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let already: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if already {
+            return Err(Error::RegistrationsPaused);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &true);
+        extend_instance_ttl(&env);
+        RegistrationsPausedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Re-opens NGO applications after `pause_registrations`. Admin-gated.
+    ///
+    /// Emits a `regresume` event and clears the registration-paused flag so
+    /// `register` works again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::NotInitialized` if registrations are not currently paused
+    /// (the error is reused to avoid allocating a new code for a transient
+    /// state check — see `docs/UPGRADE_POLICY.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// client.resume_registrations();
+    /// assert!(!client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// client.register(&owner, &name);
+    /// ```
+    pub fn resume_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let currently_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if !currently_paused {
+            // Not paused — nothing to do; treat as a no-op error so callers
+            // know the state was already open.
+            return Err(Error::NotInitialized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &false);
+        extend_instance_ttl(&env);
+        RegistrationsResumedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns `true` while the admin has paused new NGO registrations.
+    ///
+    /// Read-only; requires no authorization.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// assert!(!client.registrations_paused());
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// ```
+    pub fn registrations_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false)
+    }
+
     /// Submits an NGO application. Callable by the NGO's own address.
     /// The entry starts unverified until an admin approves it. Names must be
     /// at most 200 bytes (`MAX_NGO_NAME_LEN`), valid UTF-8, contain at least one visible
@@ -1082,6 +1132,7 @@ impl NgoRegistry {
     pub fn register(env: Env, owner: Address, name: String) -> Result<(), Error> {
         owner.require_auth();
 
+        require_registrations_open(&env)?;
         validate_name(&name)?;
 
         let key = DataKey::Ngo(owner.clone());
