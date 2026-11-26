@@ -332,6 +332,16 @@ pub enum StreamStatus {
     Paused,
 }
 
+/// Per-token totals across a donor's streams.
+#[contracttype]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DonorTotals {
+    /// Funds still held for the donor's streams, including unsettled accrual.
+    pub committed: i128,
+    /// Gross amount settled, including any protocol fee.
+    pub withdrawn: i128,
+}
+
 /// All admin configuration and global contract parameters returned by `get_config`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -443,6 +453,8 @@ pub enum DataKey {
     /// `modify_rate` accept. Absent (or zero) means no minimum. See
     /// `set_min_duration` and issue #340.
     MinDuration,
+    /// Indexed committed and gross withdrawn totals for a donor and token.
+    DonorTotals(Address, Address),
 }
 
 #[contracterror]
@@ -725,6 +737,83 @@ fn add_committed(env: &Env, token: &Address, delta: i128) -> Result<(), Error> {
     Ok(())
 }
 
+// A missing aggregate can be from an older deployment. Rebuild it from the
+// existing streams without writing on a view, then persist it on the next
+// successful mutation for this donor and token.
+fn read_donor_totals(
+    env: &Env,
+    key: &DataKey,
+    donor: &Address,
+    token: &Address,
+) -> Result<DonorTotals, Error> {
+    let storage = env.storage().persistent();
+    if let Some(totals) = storage.get(key) {
+        return Ok(totals);
+    }
+
+    let mut totals = DonorTotals::default();
+    let mut remaining: u64 = storage
+        .get(&DataKey::DonorStreamCount(donor.clone()))
+        .unwrap_or(0);
+    if remaining == 0 {
+        return Ok(totals);
+    }
+    let total: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextStreamId)
+        .unwrap_or(0);
+    for id in 0..total {
+        let Some(stream) = storage.get::<_, Stream>(&DataKey::Stream(id)) else {
+            continue;
+        };
+        if stream.donor != *donor {
+            continue;
+        }
+        if stream.token == *token {
+            totals = adjust_donor_totals(totals, stream.balance, stream.withdrawn)?;
+        }
+        remaining -= 1;
+        if remaining == 0 {
+            break;
+        }
+    }
+    Ok(totals)
+}
+
+fn adjust_donor_totals(
+    totals: DonorTotals,
+    committed_delta: i128,
+    withdrawn_delta: i128,
+) -> Result<DonorTotals, Error> {
+    Ok(DonorTotals {
+        committed: totals
+            .committed
+            .checked_add(committed_delta)
+            .ok_or(Error::ArithmeticOverflow)?,
+        withdrawn: totals
+            .withdrawn
+            .checked_add(withdrawn_delta)
+            .ok_or(Error::ArithmeticOverflow)?,
+    })
+}
+
+fn update_donor_totals(
+    env: &Env,
+    donor: &Address,
+    token: &Address,
+    committed_delta: i128,
+    withdrawn_delta: i128,
+) -> Result<(), Error> {
+    let key = DataKey::DonorTotals(donor.clone(), token.clone());
+    let totals = read_donor_totals(env, &key, donor, token)?;
+    let next = adjust_donor_totals(totals, committed_delta, withdrawn_delta)?;
+    let storage = env.storage().persistent();
+    storage.set(&key, &next);
+    storage.extend_ttl(&key, STREAM_LIFETIME_THRESHOLD, STREAM_BUMP_AMOUNT);
+    Ok(())
+}
+
 /// If an NGO registry is configured, verifies that `ngo` is approved/verified.
 /// If no registry is configured, verification is skipped and this returns `Ok(())`.
 /// Returns `Error::NgoNotVerified` if the NGO is unverified, unregistered, revoked,
@@ -753,7 +842,7 @@ fn require_verified_ngo(env: &Env, ngo: &Address) -> Result<(), Error> {
 /// Moves `amount` from a stream's `balance` into its `withdrawn` total,
 /// failing with `Error::ArithmeticOverflow` rather than panicking if
 /// either would leave i128's range.
-fn record_payout(stream: &mut Stream, amount: i128) -> Result<(), Error> {
+fn record_payout(env: &Env, stream: &mut Stream, amount: i128) -> Result<(), Error> {
     stream.balance = stream
         .balance
         .checked_sub(amount)
@@ -762,7 +851,7 @@ fn record_payout(stream: &mut Stream, amount: i128) -> Result<(), Error> {
         .withdrawn
         .checked_add(amount)
         .ok_or(Error::ArithmeticOverflow)?;
-    Ok(())
+    update_donor_totals(env, &stream.donor, &stream.token, -amount, amount)
 }
 
 /// Derives the fee taken from a payout as `accrued - net`, where `net` is
@@ -945,7 +1034,7 @@ fn settle_core(env: &Env, stream: &mut Stream, now: u64) -> Result<i128, Error> 
 
     if accrued > 0 {
         // Update stream state before the external token transfer
-        record_payout(stream, accrued)?;
+        record_payout(env, stream, accrued)?;
     }
     stream.last_update = now;
 
@@ -1003,6 +1092,9 @@ fn cancel_stream_inner(
     let accrued = settle_core(env, &mut stream, now)?;
 
     let refund = stream.balance;
+    if refund > 0 {
+        update_donor_totals(env, &stream.donor, &stream.token, -refund, 0)?;
+    }
 
     // Update state before the external token transfer
     stream.balance = 0;
@@ -1171,6 +1263,9 @@ fn create_stream_inner(
         status: StreamStatus::Active,
         cancelled: false,
     };
+
+    // Load any legacy totals before adding the stream to storage.
+    update_donor_totals(&env, &donor, &token, deposit, 0)?;
 
     // Write all state before the external token transfer
     env.storage()
@@ -1636,6 +1731,13 @@ impl DonationVault {
             .persistent()
             .get(&DataKey::DonorStreamCount(donor))
             .unwrap_or(0)
+    }
+
+    /// Returns committed and gross withdrawn funds for the donor and token.
+    /// Requires no authorization and does not mutate storage.
+    pub fn donor_totals(env: Env, donor: Address, token: Address) -> Result<DonorTotals, Error> {
+        let key = DataKey::DonorTotals(donor.clone(), token.clone());
+        read_donor_totals(&env, &key, &donor, &token)
     }
 
     /// Lists stream ids associated with an NGO in creation order.
@@ -3032,7 +3134,7 @@ impl DonationVault {
             return Err(Error::NothingToWithdraw);
         }
 
-        record_payout(&mut stream, accrued)?;
+        record_payout(&env, &mut stream, accrued)?;
         stream.last_update = now;
         let drained = stream.balance == 0;
         if drained {
@@ -3198,7 +3300,7 @@ impl DonationVault {
                 continue;
             }
 
-            record_payout(&mut stream, accrued)?;
+            record_payout(&env, &mut stream, accrued)?;
             stream.last_update = now;
             if stream.balance == 0 {
                 stream.status = StreamStatus::Drained;
@@ -3673,6 +3775,7 @@ impl DonationVault {
 
         let refund = stream.balance;
         if refund > 0 {
+            update_donor_totals(&env, &stream.donor, &stream.token, -refund, 0)?;
             // The refunded remainder is no longer held for the stream, so it
             // leaves the token's committed balance (issue #346).
             add_committed(&env, &stream.token, -refund)?;
@@ -3769,6 +3872,7 @@ impl DonationVault {
 
         let now = env.ledger().timestamp();
         let settled = settle_core(&env, &mut stream, now)?;
+        update_donor_totals(&env, &stream.donor, &stream.token, amount, 0)?;
 
         // Update state before the external token transfer
         stream.balance = stream

@@ -24,6 +24,7 @@ abort the invocation.
 | `get_stream` | `stream_id: u64` / `Result<Stream, Error>` | none | `StreamNotFound` | — |
 | `get_streams` | `ids: Vec<u64>` / `Result<Vec<Option<Stream>>, Error>` | none | `BatchLimitExceeded` | — |
 | `streams_by_donor` | `donor: Address` / `Vec<u64>` | none | — | — |
+| `donor_totals` | `donor: Address, token: Address` / `Result<DonorTotals, Error>` (committed, gross withdrawn) | none | `ArithmeticOverflow` | — |
 | `streams_by_ngo` | `ngo: Address, start: u32, limit: u32` / `Vec<u64>` | none | — | — |
 | `stream_count` | none / `u64` | none | — | — |
 | `pending_accrual` | `stream_id: u64` / `Result<i128, Error>` | none | `StreamNotFound` | — |
@@ -128,3 +129,13 @@ returns `NotRegistered`; boolean/list views return empty/false for absent data.
 
 For event topic and payload layouts, see [EVENTS.md](./EVENTS.md). For
 storage and TTL behavior, see [STORAGE.md](./STORAGE.md).
+
+### Donor totals
+
+`donor_totals` returns the funds still held for the donor's streams in the
+requested token and the gross amount paid out, including protocol fees.
+Refunds reduce the committed balance without increasing withdrawn.
+
+After an upgrade, the first request for an unindexed donor and token may scan
+existing streams. The view does not modify storage. The next successful fund
+movement for the pair records the aggregate for future reads.

@@ -88,6 +88,7 @@ for what works while the vault is paused, and the
 | `get_stream` | Anyone | View. |
 | `get_streams` | Anyone | View. |
 | `streams_by_donor` | Anyone | View. |
+| `donor_totals` | Anyone | View. |
 | `streams_by_ngo` | Anyone | View. |
 | `stream_count` | Anyone | View. |
 | `pending_accrual` | Anyone | View. |

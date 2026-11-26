@@ -2268,6 +2268,97 @@ fn streams_by_donor_is_per_donor() {
 }
 
 #[test]
+fn donor_totals_tracks_streams_and_tokens_through_settlement_and_refunds() {
+    let s = setup();
+    let donor = &s.donor;
+    let ngo = &s.ngo;
+    let token = &s.token.address;
+    let other_donor = Address::generate(&s.env);
+    let (other_token, other_admin) = create_token(&s.env, &Address::generate(&s.env));
+    let other_token = &other_token.address;
+    let treasury = Address::generate(&s.env);
+    s.client.set_treasury(&treasury);
+    s.client.set_fee_bps(&500);
+    s.token_admin.mint(donor, &1_800);
+    s.token_admin.mint(&other_donor, &500);
+    other_admin.mint(donor, &700);
+
+    let totals = |owner: &Address, asset: &Address| {
+        let DonorTotals {
+            committed,
+            withdrawn,
+        } = s.client.donor_totals(owner, asset);
+        (committed, withdrawn)
+    };
+    assert_eq!(totals(donor, token), (0, 0));
+    let first = s.client.create_stream(donor, ngo, token, &1_000, &10);
+    let second = s.client.create_stream(donor, ngo, token, &600, &20);
+    let other = s.client.create_stream(donor, ngo, other_token, &700, &5);
+    s.client.create_stream(&other_donor, ngo, token, &500, &5);
+    assert_eq!(totals(donor, token), (1_600, 0));
+    assert_eq!(totals(donor, other_token), (700, 0));
+    assert_eq!(totals(&other_donor, token), (500, 0));
+
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    assert_eq!(totals(donor, token), (1_600, 0));
+    s.client.top_up(&first, &200);
+    assert_eq!(totals(donor, token), (1_700, 100));
+
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    s.client
+        .withdraw_batch(&soroban_sdk::vec![&s.env, first, second, other]);
+    assert_eq!(totals(donor, token), (1_200, 600));
+    assert_eq!(totals(donor, other_token), (600, 100));
+
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    assert_eq!(s.client.cancel_stream(&first), 900);
+    assert_eq!(totals(donor, token), (200, 700));
+    s.client.pause();
+    assert_eq!(s.client.rescue_stream(&second), 200);
+    assert_eq!(totals(donor, token), (0, 700));
+    assert_eq!(totals(donor, other_token), (600, 100));
+    assert_eq!(totals(&other_donor, token), (500, 0));
+}
+
+#[test]
+fn donor_totals_reads_legacy_streams_and_indexes_them_on_next_write() {
+    let s = setup();
+    let token = &s.token.address;
+    let donor = &s.donor;
+    s.token_admin.mint(donor, &1_500);
+    let first = s.client.create_stream(donor, &s.ngo, token, &1_000, &10);
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    assert_eq!(s.client.withdraw(&first), 100);
+
+    let key = DataKey::DonorTotals(donor.clone(), token.clone());
+    s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().remove(&key);
+    });
+    let old = s.client.donor_totals(donor, token);
+    assert_eq!(old.committed, 900);
+    assert_eq!(old.withdrawn, 100);
+    s.env.as_contract(&s.client.address, || {
+        assert!(!s.env.storage().persistent().has(&key));
+    });
+
+    s.client.create_stream(donor, &s.ngo, token, &300, &10);
+    s.env.as_contract(&s.client.address, || {
+        let stored: DonorTotals = s.env.storage().persistent().get(&key).unwrap();
+        assert_eq!(stored.committed, 1_200);
+        assert_eq!(stored.withdrawn, 100);
+    });
+
+    s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().remove(&key);
+    });
+    s.env.ledger().with_mut(|l| l.timestamp += 10);
+    s.client.top_up(&first, &100);
+    let totals = s.client.donor_totals(donor, token);
+    assert_eq!(totals.committed, 1_200);
+    assert_eq!(totals.withdrawn, 200);
+}
+
+#[test]
 fn donor_stream_count_is_zero_before_any_stream() {
     let s = setup();
     assert_eq!(s.client.donor_stream_count(&s.donor), 0);
