@@ -181,30 +181,13 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
-/// Event emitted when an ownership transfer is proposed.
-#[contractevent(topics = ["ownprop"], data_format = "vec")]
-#[allow(missing_docs)]
-pub struct OwnershipProposedEvent {
-    #[topic]
-    pub current_owner: Address,
-    pub new_owner: Address,
+#[contractevent(topics = ["regrpause"], data_format = "single-value")]
+pub struct RegistrationsPausedEvent {
+    pub data: (),
 }
 
-/// Event emitted when an ownership transfer is accepted.
-#[contractevent(topics = ["ownaccpt"], data_format = "vec")]
-#[allow(missing_docs)]
-pub struct OwnershipAcceptedEvent {
-    #[topic]
-    pub old_owner: Address,
-    pub new_owner: Address,
-}
-
-/// Event emitted when an ownership transfer is cancelled.
-#[contractevent(topics = ["owncancel"], data_format = "single-value")]
-#[allow(missing_docs)]
-pub struct OwnershipCancelledEvent {
-    #[topic]
-    pub owner: Address,
+#[contractevent(topics = ["regresume"], data_format = "single-value")]
+pub struct RegistrationsResumedEvent {
     pub data: (),
 }
 
@@ -231,6 +214,12 @@ pub struct Ngo {
     /// reaches it the entry is treated as unverified by `is_verified` and
     /// `get_ngo`, until an admin renews it. See issue #348.
     pub verified_until: Option<u64>,
+    /// Bitmask of category tags chosen by the owner, expressed as the bitwise
+    /// OR of `CATEGORY_*` constants. `0` means uncategorised. Set via
+    /// `set_categories`; locked once the NGO is verified (the owner must
+    /// request revocation to change it after approval). Readable via
+    /// `categories()` or `get_ngo()`.
+    pub categories: u32,
     /// Optional pending new owner address. Set by `propose_owner_transfer` and
     /// cleared by `accept_owner_transfer` or `cancel_owner_transfer`. `None` means
     /// no ownership transfer is pending.
@@ -316,13 +305,17 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
-    /// Seconds that must elapse between `propose_upgrade` and
-    /// `execute_upgrade`. Zero (or absent) means the timelock is disabled and
-    /// the immediate `upgrade` entry point is allowed.
-    UpgradeDelay,
-    /// The upgrade recorded by `propose_upgrade` and not yet executed or
-    /// cancelled. Absent means no upgrade is pending.
-    PendingUpgrade,
+    /// The owner that claimed an NGO name, keyed by the SHA-256 of the exact
+    /// name bytes (a name can be up to 200 bytes, close to the 250-byte
+    /// ledger key limit, so the name itself is not used as the key).
+    /// Maintained by `register`, `update_name` and the removal entry points
+    /// and read by `owner_by_name`. New variants are appended: never reorder
+    /// this enum.
+    OwnerByName(BytesN<32>),
+    /// Whether new NGO registrations are paused by the admin.
+    /// `true` while `pause_registrations` is in effect; absent or `false`
+    /// means registrations are open. See `pause_registrations` / `resume_registrations`.
+    RegistrationsPaused,
 }
 
 #[contracterror]
@@ -366,16 +359,9 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
-    /// `execute_upgrade` or `cancel_upgrade` was called with no upgrade
-    /// proposed.
-    NoPendingUpgrade = 16,
-    /// `execute_upgrade` was called before the proposed upgrade's timelock
-    /// elapsed.
-    UpgradeDelayNotElapsed = 17,
-    /// The immediate `upgrade` entry point was called while a non-zero
-    /// `upgrade_delay` is configured: upgrades must go through
-    /// `propose_upgrade` / `execute_upgrade`.
-    UpgradeTimelockEnabled = 18,
+    /// `register` was called while the admin has paused new registrations.
+    /// Resume with `resume_registrations`.
+    RegistrationsPaused = 16,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -427,6 +413,45 @@ fn extend_owner_index_ttl(env: &Env, index: u32, owner: &Address) {
         NGO_LIFETIME_THRESHOLD,
         NGO_BUMP_AMOUNT,
     );
+}
+
+/// The name-index key for `name`: the SHA-256 of its bytes.
+fn name_key(env: &Env, name: &String) -> DataKey {
+    let bytes: Bytes = name.into();
+    DataKey::OwnerByName(env.crypto().sha256(&bytes).to_bytes())
+}
+
+fn extend_name_index_ttl(env: &Env, name: &String) {
+    let key = name_key(env, name);
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, NGO_LIFETIME_THRESHOLD, NGO_BUMP_AMOUNT);
+    }
+}
+
+/// Points `name` at `owner` in the name index, unless another owner already
+/// holds the name: the first claimant keeps it until it renames or leaves,
+/// and a later registrant with the same name is simply not indexed. (Names are
+/// not unique yet; this keeps the index from silently flipping between
+/// owners until they are.)
+fn index_name(env: &Env, name: &String, owner: &Address) {
+    let key = name_key(env, name);
+    if !env.storage().persistent().has(&key) {
+        env.storage().persistent().set(&key, owner);
+    }
+    if env.storage().persistent().get::<_, Address>(&key).as_ref() == Some(owner) {
+        extend_name_index_ttl(env, name);
+    }
+}
+
+/// Removes `name` from the name index, but only when `owner` is the one it
+/// points at, so an owner leaving never clears another owner's claim.
+fn unindex_name(env: &Env, name: &String, owner: &Address) {
+    let key = name_key(env, name);
+    if env.storage().persistent().get::<_, Address>(&key).as_ref() == Some(owner) {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 fn get_owner_count(env: &Env) -> u32 {
@@ -555,6 +580,48 @@ fn validate_name(name: &String) -> Result<(), Error> {
     validate_name_bytes(&buf[..len])
 }
 
+/// Produces a canonical form of an NGO name for use as a uniqueness key.
+///
+/// The canonical form is the name with leading/trailing ASCII whitespace
+/// trimmed and all ASCII letters lowercased. This means "Red Cross",
+/// "  red cross  ", and "RED CROSS" all map to the same key, so a new
+/// registrant cannot reserve a name that is visually indistinguishable from
+/// an existing one. Non-ASCII characters (including Unicode whitespace) are
+/// left unchanged.
+///
+/// Returns the canonical bytes as a `Bytes` value for use as a storage key.
+/// The input must have already passed `validate_name`, so it is non-empty
+/// valid UTF-8 with at least one visible character.
+fn canonical_name_key(env: &Env, name: &String) -> Bytes {
+    let len = name.len() as usize;
+    let mut buf = [0u8; MAX_NGO_NAME_LEN as usize];
+    let sdk_bytes: Bytes = name.into();
+    sdk_bytes.copy_into_slice(&mut buf[..len]);
+    let slice = &buf[..len];
+
+    // Trim leading ASCII whitespace.
+    let start = slice
+        .iter()
+        .position(|&b| !b.is_ascii_whitespace())
+        .unwrap_or(len);
+    // Trim trailing ASCII whitespace.
+    let end = slice[start..]
+        .iter()
+        .rposition(|&b| !b.is_ascii_whitespace())
+        .map(|i| start + i + 1)
+        .unwrap_or(start);
+    let trimmed = &slice[start..end];
+
+    // Lowercase ASCII letters in place using a second stack buffer.
+    let mut canonical = [0u8; MAX_NGO_NAME_LEN as usize];
+    let canonical_len = trimmed.len();
+    for (i, &b) in trimmed.iter().enumerate() {
+        canonical[i] = b.to_ascii_lowercase();
+    }
+
+    Bytes::from_slice(env, &canonical[..canonical_len])
+}
+
 /// Validates an optional NGO metadata URI.
 ///
 /// `None` is always allowed. `Some` must be at most `MAX_METADATA_URI_LEN`
@@ -614,6 +681,20 @@ fn require_approver(env: &Env, candidate: &Address) -> Result<(), Error> {
         return Err(Error::NotApprover);
     }
     candidate.require_auth();
+    Ok(())
+}
+
+/// Returns `Err(Error::RegistrationsPaused)` if the admin has paused new
+/// registrations. Called at the top of `register` to enforce the switch.
+fn require_registrations_open(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::RegistrationsPaused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::RegistrationsPaused);
+    }
     Ok(())
 }
 
@@ -677,7 +758,8 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
 /// verified/unverified check. Does not touch the instance TTL â€” the caller
 /// decides whether to bump it. Decrements `NgoCount`, and `VerifiedCount` when
 /// the entry being removed was verified, using checked subtraction and
-/// returning `Error::ArithmeticOverflow` on underflow.
+/// returning `Error::ArithmeticOverflow` on underflow. Also clears the
+/// `NameOwner` uniqueness index entry so the freed name can be re-registered.
 fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
     let count: u64 = env
         .storage()
@@ -686,18 +768,36 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
         .unwrap_or(0);
     let new_ngo_count = count.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
 
-    // Keep `verified_count` in step with the entry being removed.
+    // Keep `verified_count` and the name index in step with the entry being
+    // removed.
     if let Some(ngo) = env
         .storage()
         .persistent()
         .get::<_, Ngo>(&DataKey::Ngo(owner.clone()))
     {
+        unindex_name(env, &ngo.name, owner);
         if ngo.verified {
             let verified = get_verified_count(env);
             let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
             set_verified_count(env, new_verified);
         }
     }
+    // Keep `verified_count` in step with the entry being removed, and
+    // capture the name before we delete the entry so we can free it below.
+    let maybe_name: Option<String> = env
+        .storage()
+        .persistent()
+        .get::<_, Ngo>(&DataKey::Ngo(owner.clone()))
+        .map(|ngo| {
+            if ngo.verified {
+                let verified = get_verified_count(env);
+                // Saturating sub rather than propagating an error here:
+                // underflow means the counter was already inconsistent,
+                // and removing the entry is still the right thing to do.
+                set_verified_count(env, verified.saturating_sub(1));
+            }
+            ngo.name
+        });
 
     env.storage()
         .persistent()
@@ -706,6 +806,14 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
     env.storage()
         .instance()
         .set(&DataKey::NgoCount, &new_ngo_count);
+
+    // Free the name so a future registrant can claim it.
+    if let Some(name) = maybe_name {
+        let key = canonical_name_key(env, &name);
+        env.storage()
+            .instance()
+            .remove(&DataKey::NameOwner(key));
+    }
 
     // Remove from index using swap-and-pop to maintain a dense [0..count) index
     if let Some(index) = env
@@ -934,6 +1042,129 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Prevents new NGO applications while the switch is on. Admin-gated.
+    ///
+    /// Once set, every call to `register` fails with `Error::RegistrationsPaused`
+    /// until the admin calls `resume_registrations`. All other entry points
+    /// (approve, revoke, unregister, etc.) continue to work normally.
+    /// Emits a `regrpause` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::RegistrationsPaused` if registrations are already paused.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// assert!(client.try_register(&owner, &name).is_err());
+    /// ```
+    pub fn pause_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let already: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if already {
+            return Err(Error::RegistrationsPaused);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &true);
+        extend_instance_ttl(&env);
+        RegistrationsPausedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Re-opens NGO applications after `pause_registrations`. Admin-gated.
+    ///
+    /// Emits a `regresume` event and clears the registration-paused flag so
+    /// `register` works again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotInitialized` if the registry has not been initialised,
+    /// or `Error::NotInitialized` if registrations are not currently paused
+    /// (the error is reused to avoid allocating a new code for a transient
+    /// state check — see `docs/UPGRADE_POLICY.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// client.pause_registrations();
+    /// client.resume_registrations();
+    /// assert!(!client.registrations_paused());
+    /// let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// client.register(&owner, &name);
+    /// ```
+    pub fn resume_registrations(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let currently_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false);
+        if !currently_paused {
+            // Not paused — nothing to do; treat as a no-op error so callers
+            // know the state was already open.
+            return Err(Error::NotInitialized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationsPaused, &false);
+        extend_instance_ttl(&env);
+        RegistrationsResumedEvent { data: () }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns `true` while the admin has paused new NGO registrations.
+    ///
+    /// Read-only; requires no authorization.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// assert!(!client.registrations_paused());
+    /// client.pause_registrations();
+    /// assert!(client.registrations_paused());
+    /// ```
+    pub fn registrations_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::RegistrationsPaused)
+            .unwrap_or(false)
+    }
+
     /// Submits an NGO application. Callable by the NGO's own address.
     /// The entry starts unverified until an admin approves it. Names must be
     /// at most 200 bytes (`MAX_NGO_NAME_LEN`), valid UTF-8, contain at least one visible
@@ -962,11 +1193,22 @@ impl NgoRegistry {
     pub fn register(env: Env, owner: Address, name: String) -> Result<(), Error> {
         owner.require_auth();
 
+        require_registrations_open(&env)?;
         validate_name(&name)?;
 
         let key = DataKey::Ngo(owner.clone());
         if env.storage().persistent().has(&key) {
             return Err(Error::AlreadyRegistered);
+        }
+
+        // Reject names that are already claimed (after trimming and case-folding).
+        let name_key = canonical_name_key(&env, &name);
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::NameOwner(name_key.clone()))
+        {
+            return Err(Error::NameTaken);
         }
 
         let count: u64 = env
@@ -985,6 +1227,7 @@ impl NgoRegistry {
             verified: false,
             metadata_uri: None,
             verified_until: None,
+            categories: 0,
             pending_owner: None,
         };
         env.storage().persistent().set(&key, &ngo);
@@ -992,6 +1235,11 @@ impl NgoRegistry {
         env.storage()
             .instance()
             .set(&DataKey::NgoCount, &new_ngo_count);
+
+        // Claim the name in the uniqueness index.
+        env.storage()
+            .instance()
+            .set(&DataKey::NameOwner(name_key), &owner);
 
         // Maintain the registered owners index
         env.storage()
@@ -1001,6 +1249,7 @@ impl NgoRegistry {
             .persistent()
             .set(&DataKey::IndexByOwner(owner.clone()), &index);
         set_owner_count(&env, new_count);
+        index_name(&env, &name, &owner);
 
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &owner);
@@ -1460,8 +1709,31 @@ impl NgoRegistry {
 
         // Only update and emit event if the name actually changes
         if ngo.name != name {
+            unindex_name(&env, &ngo.name, &owner);
+            // Check the new name is not already claimed by someone else.
+            let new_name_key = canonical_name_key(&env, &name);
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::NameOwner(new_name_key.clone()))
+            {
+                return Err(Error::NameTaken);
+            }
+
+            // Release the old name so another registrant can claim it.
+            let old_name_key = canonical_name_key(&env, &ngo.name);
+            env.storage()
+                .instance()
+                .remove(&DataKey::NameOwner(old_name_key));
+
+            // Claim the new name.
+            env.storage()
+                .instance()
+                .set(&DataKey::NameOwner(new_name_key), &owner);
+
             ngo.name = name.clone();
             env.storage().persistent().set(&key, &ngo);
+            index_name(&env, &name, &owner);
             extend_instance_ttl(&env);
             extend_ngo_ttl(&env, &owner);
             RenamedEvent { owner, name }.publish(&env);
@@ -1534,6 +1806,37 @@ impl NgoRegistry {
         Ok(())
     }
 
+    /// Looks up the owner of the NGO registered under `name`, without listing
+    /// the registry. Read-only and unauthenticated.
+    ///
+    /// Returns `None` when no registered NGO holds the name. The match is on
+    /// the exact name string (case and whitespace included). The lookup is
+    /// backed by an index that `register`, `update_name`, `unregister`,
+    /// `remove_ngo` and `reject_ngo` keep in step, so a renamed NGO is found
+    /// under its new name only, and a name is free again once its NGO leaves.
+    /// If two NGOs register the same name (names are not unique yet), the
+    /// first one keeps the name and the other is not indexed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// # let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// client.register(&owner, &name);
+    /// assert_eq!(client.owner_by_name(&name), Some(owner));
+    /// ```
+    pub fn owner_by_name(env: Env, name: String) -> Option<Address> {
+        env.storage().persistent().get(&name_key(&env, &name))
+    }
+
     /// Reads back an NGO's metadata URI, or `None` when it has none set.
     ///
     /// Never errors or panics: an unregistered address, and a registered
@@ -1563,6 +1866,91 @@ impl NgoRegistry {
             .persistent()
             .get::<_, Ngo>(&DataKey::Ngo(owner))
             .and_then(|ngo| ngo.metadata_uri)
+    }
+
+    /// Sets the category bitmask for the caller's own NGO entry. The bitmask
+    /// is the bitwise OR of any `CATEGORY_*` constants that describe what the
+    /// NGO does. Pass `0` to clear all categories.
+    ///
+    /// Categories are **owner-settable before verification** and are locked
+    /// once the entry is approved (`Error::AlreadyVerified`). To change them
+    /// after approval the owner must ask an admin to revoke verification first.
+    ///
+    /// Any bit outside `VALID_CATEGORY_MASK` (bits 8–31) is reserved and
+    /// causes `Error::InvalidCategories`. Only emits `CategoriesSetEvent` when
+    /// the value actually changes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, CATEGORY_HEALTH, CATEGORY_EDUCATION};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// client.set_categories(&owner, &(CATEGORY_HEALTH | CATEGORY_EDUCATION));
+    /// assert_eq!(client.categories(&owner), CATEGORY_HEALTH | CATEGORY_EDUCATION);
+    /// ```
+    pub fn set_categories(env: Env, owner: Address, categories: u32) -> Result<(), Error> {
+        owner.require_auth();
+
+        if categories & !VALID_CATEGORY_MASK != 0 {
+            return Err(Error::InvalidCategories);
+        }
+
+        let key = DataKey::Ngo(owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        if ngo.verified {
+            return Err(Error::AlreadyVerified);
+        }
+
+        if ngo.categories != categories {
+            ngo.categories = categories;
+            env.storage().persistent().set(&key, &ngo);
+            extend_instance_ttl(&env);
+            extend_ngo_ttl(&env, &owner);
+
+            CategoriesSetEvent { owner, categories }.publish(&env);
+        }
+
+        Ok(())
+    }
+
+    /// Reads back the category bitmask for an NGO. Returns `0` for an
+    /// unregistered address or one that has not called `set_categories`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, CATEGORY_ENVIRONMENT};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let owner = Address::generate(&env);
+    /// # client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.categories(&owner), 0);
+    ///
+    /// client.set_categories(&owner, &CATEGORY_ENVIRONMENT);
+    /// assert_eq!(client.categories(&owner), CATEGORY_ENVIRONMENT);
+    /// ```
+    pub fn categories(env: Env, owner: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, Ngo>(&DataKey::Ngo(owner))
+            .map(|ngo| ngo.categories)
+            .unwrap_or(0)
     }
 
     /// Reads back an NGO's registry entry, registered or not.
@@ -2035,11 +2423,22 @@ impl NgoRegistry {
     /// client.touch_ngo(&owner);
     /// ```
     pub fn touch_ngo(env: Env, owner: Address) -> Result<(), Error> {
-        if !env.storage().persistent().has(&DataKey::Ngo(owner.clone())) {
-            return Err(Error::NotRegistered);
-        }
+        let ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ngo(owner.clone()))
+            .ok_or(Error::NotRegistered)?;
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &owner);
+        if env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&name_key(&env, &ngo.name))
+            .as_ref()
+            == Some(&owner)
+        {
+            extend_name_index_ttl(&env, &ngo.name);
+        }
         if let Some(index) = env
             .storage()
             .persistent()
@@ -2264,6 +2663,7 @@ impl NgoRegistry {
             verified: ngo.verified,
             metadata_uri: ngo.metadata_uri.clone(),
             verified_until: ngo.verified_until,
+            categories: ngo.categories,
             pending_owner: None,
         };
 
