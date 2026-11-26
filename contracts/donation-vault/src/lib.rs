@@ -1,41 +1,67 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Donation vault contract for the StreamGive protocol.
+//!
+//! Accepts token deposits from donors and releases them to NGOs as a
+//! continuous per-second stream. Supports stream creation, withdrawal,
+//! cancellation, top-up, rate modification, transfer, and an admin-gated
+//! emergency rescue path.
 #![no_std]
+#![allow(missing_docs)]
 use soroban_sdk::{
     contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
     symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, Map, String, Vec,
 };
 
+use common::{
+    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+    PERSISTENT_LIFETIME_THRESHOLD,
+};
+
+/// Event emitted when a new admin is proposed.
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ProposedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when a proposed admin accepts the role.
 #[contractevent(topics = ["acptadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct AcceptedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when a pending admin proposal is cancelled.
 #[contractevent(topics = ["canceladm"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct CancelledAdminEvent {
     pub data: (),
 }
 
+/// Event emitted when the admin permanently renounces control.
 #[contractevent(topics = ["renounce"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenouncedAdminEvent {
     pub data: (),
 }
 
+/// Event emitted when the vault is paused.
 #[contractevent(topics = ["pause"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct PausedEvent {
     pub data: (),
 }
 
+/// Event emitted when the vault is unpaused.
 #[contractevent(topics = ["unpause"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UnpausedEvent {
     pub data: (),
 }
 
+/// Event emitted when a new stream is created.
 #[contractevent(topics = ["created"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct CreatedEvent {
     #[topic]
     pub stream_id: u64,
@@ -49,7 +75,9 @@ pub struct CreatedEvent {
     pub memo: Bytes,
 }
 
+/// Event emitted on each withdrawal from a stream.
 #[contractevent(topics = ["withdraw"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct WithdrawnEvent {
     #[topic]
     pub stream_id: u64,
@@ -66,6 +94,7 @@ pub struct WithdrawnEvent {
 /// paid to the NGO over the stream's life, so an indexer can mark the stream
 /// finished without recomputing the transition from `withdraw` events.
 #[contractevent(topics = ["drained"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct DrainedEvent {
     #[topic]
     pub stream_id: u64,
@@ -73,7 +102,9 @@ pub struct DrainedEvent {
     pub total_paid: i128,
 }
 
+/// Event emitted when a stream is cancelled.
 #[contractevent(topics = ["cancel"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct CancelledStreamEvent {
     #[topic]
     pub stream_id: u64,
@@ -81,7 +112,9 @@ pub struct CancelledStreamEvent {
     pub refund: i128,
 }
 
+/// Event emitted when a stream is topped up with additional funds.
 #[contractevent(topics = ["topup"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct ToppedUpEvent {
     #[topic]
     pub stream_id: u64,
@@ -89,7 +122,9 @@ pub struct ToppedUpEvent {
     pub settled: i128,
 }
 
+/// Event emitted when a stream's per-second rate is modified.
 #[contractevent(topics = ["ratemod"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct RateModifiedEvent {
     #[topic]
     pub stream_id: u64,
@@ -98,7 +133,9 @@ pub struct RateModifiedEvent {
     pub settled: i128,
 }
 
+/// Event emitted when a stream is transferred to a new NGO.
 #[contractevent(topics = ["transfer"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct TransferStreamEvent {
     #[topic]
     pub stream_id: u64,
@@ -107,119 +144,161 @@ pub struct TransferStreamEvent {
     pub settled: i128,
 }
 
+/// Event emitted when a stream is paused by the donor.
 #[contractevent(topics = ["strmpause"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct PausedStreamEvent {
     #[topic]
     pub stream_id: u64,
     pub settled: i128,
 }
 
+/// Event emitted when a paused stream is resumed by the donor.
 #[contractevent(topics = ["strmresume"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct ResumedStreamEvent {
     #[topic]
     pub stream_id: u64,
 }
 
+/// Event emitted when the treasury address is set.
 #[contractevent(topics = ["treasset"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct TreasurySetEvent {
     pub treasury: Address,
 }
 
+/// Event emitted when the global fee basis points are configured.
 #[contractevent(topics = ["feeset"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct FeeBpsSetEvent {
     pub fee_bps: u32,
 }
 
+/// Event emitted when a per-token fee override is set.
 #[contractevent(topics = ["tokfeeset"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct TokenFeeBpsSetEvent {
     #[topic]
     pub token: Address,
     pub fee_bps: u32,
 }
 
+/// Event emitted when a per-token fee override is cleared.
 #[contractevent(topics = ["tokfeeclr"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct TokenFeeBpsClearedEvent {
     #[topic]
     pub token: Address,
     pub data: (),
 }
 
+/// Event emitted when the per-donor stream cap is configured.
 #[contractevent(topics = ["maxstrm"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MaxStreamsPerDonorSetEvent {
     pub limit: u64,
 }
 
+/// Event emitted when the maximum per-second rate is set.
 #[contractevent(topics = ["maxrate"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MaxRateSetEvent {
     pub max_rate: i128,
 }
 
+/// Event emitted when the maximum per-second rate ceiling is cleared.
 #[contractevent(topics = ["maxrtclr"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MaxRateClearedEvent {
     pub data: (),
 }
 
+/// Event emitted when the maximum deposit per stream is configured.
 #[contractevent(topics = ["maxdep"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MaxDepositPerStreamSetEvent {
     pub max_deposit: i128,
 }
 
+/// Event emitted when the maximum deposit per stream is cleared.
 #[contractevent(topics = ["maxdepclr"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MaxDepositPerStreamClearedEvent {
     pub data: (),
 }
 
+/// Event emitted when the minimum stream duration is configured.
 #[contractevent(topics = ["mindur"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MinDurationSetEvent {
     pub min_duration: u64,
 }
 
+/// Event emitted when a stream is rescued by the admin during a pause.
 #[contractevent(topics = ["rescue"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RescuedStreamEvent {
     #[topic]
     pub stream_id: u64,
     pub refund: i128,
 }
 
+/// Event emitted when the treasury address is cleared.
 #[contractevent(topics = ["treclr"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct TreasuryClearedEvent {
     pub data: (),
 }
 
+/// Event emitted when the minimum deposit is configured.
 #[contractevent(topics = ["mindep"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MinDepositSetEvent {
     pub min_deposit: i128,
 }
 
+/// Event emitted when the cancelled-stream retention window is configured.
 #[contractevent(topics = ["grceset"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct CancelGraceLedgersSetEvent {
     pub grace_ledgers: u32,
 }
 
+/// Event emitted when the NGO registry address is set.
 #[contractevent(topics = ["regset"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct RegistrySetEvent {
     pub registry: Address,
     pub previous_registry: Option<Address>,
 }
 
+/// Event emitted when the NGO registry address is cleared.
 #[contractevent(topics = ["regclr"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RegistryClearedEvent {
     pub data: (),
 }
 
+/// Event emitted when an NGO configures a payout address.
 #[contractevent(topics = ["payoutset"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct PayoutAddressSetEvent {
     #[topic]
     pub ngo: Address,
     pub payout: Address,
 }
 
+/// Event emitted when the contract is initialized.
 #[contractevent(topics = ["init"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct InitializedEvent {
     pub admin: Address,
 }
 
+/// Event emitted when the contract is upgraded.
 #[contractevent(topics = ["upgrade"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
@@ -233,19 +312,25 @@ pub struct ConfigSnapshotEvent {
     pub config: Config,
 }
 
+/// Event emitted when a timelocked upgrade is proposed.
 #[contractevent(topics = ["uppropose"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeProposedEvent {
     #[topic]
     pub new_wasm_hash: BytesN<32>,
     pub executable_at: u64,
 }
 
+/// Event emitted when a pending upgrade is cancelled.
 #[contractevent(topics = ["upcancel"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeCancelledEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when the upgrade timelock delay is configured.
 #[contractevent(topics = ["updelay"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeDelaySetEvent {
     pub delay: u64,
 }
@@ -254,6 +339,7 @@ pub struct UpgradeDelaySetEvent {
 /// the vault by mistake (above the committed balance for that token) to the
 /// treasury. See issue #346.
 #[contractevent(topics = ["sweep"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct SurplusSweptEvent {
     #[topic]
     pub token: Address,
@@ -272,10 +358,7 @@ pub struct PendingUpgrade {
     pub executable_at: u64,
 }
 
-pub mod events;
 mod math;
-pub mod storage;
-pub mod types;
 
 /// Mirrors ngo-registry's `Ngo` record for cross-contract calls. Declared
 /// locally rather than imported from the `ngo-registry` crate: depending on
@@ -285,11 +368,15 @@ pub mod types;
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct NgoRecord {
+    /// The address that registered and owns this NGO entry.
     pub owner: Address,
+    /// The display name of the NGO.
     pub name: String,
+    /// Whether the NGO has been verified in the registry.
     pub verified: bool,
     pub metadata_uri: Option<String>,
     pub verified_until: Option<u64>,
+    pub pending_owner: Option<Address>,
 }
 
 /// Thin cross-contract interface onto the configured ngo-registry contract.
@@ -314,18 +401,26 @@ trait NgoRegistryInterface {
 // and compare a whole stream at once instead of field by field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stream {
+    /// The address that opened this stream and may cancel or top it up.
     pub donor: Address,
+    /// The address receiving the accruing payout.
     pub ngo: Address,
+    /// The token being streamed.
     pub token: Address,
+    /// Accrual amount per second, in token units.
     pub rate: i128,
+    /// Undrawn amount remaining in the vault for this stream.
     pub balance: i128,
+    /// Cumulative gross amount paid out from this stream so far.
     pub withdrawn: i128,
+    /// Ledger timestamp at which this stream was created.
     pub created_at: u64,
     /// When this stream begins paying out. Equal to `created_at` for a plain
     /// `create_stream`; later than it for `create_stream_with_start`. No time
     /// before this timestamp accrues, so a cliff stream stays idle until it
     /// arrives. See issue #337.
     pub start: u64,
+    /// Ledger timestamp of the last checkpoint for this stream.
     pub last_update: u64,
     /// Optional free-form tag chosen by the donor at creation, e.g. a campaign
     /// id, capped at `MAX_MEMO_BYTES` bytes. Empty means no memo was set.
@@ -362,10 +457,15 @@ pub enum StreamStatus {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Whether fund-moving operations are currently halted.
     pub paused: bool,
+    /// The address receiving protocol fees, if configured.
     pub treasury: Option<Address>,
+    /// The global protocol fee in basis points.
     pub fee_bps: u32,
+    /// The minimum deposit accepted by `create_stream` and `top_up`.
     pub min_deposit: i128,
+    /// The maximum number of streams a single donor may open.
     pub max_streams_per_donor: u64,
     /// The highest per-second `rate` accepted by `create_stream` and
     /// `modify_rate`, when an admin has configured one. `None` means no cap.
@@ -374,12 +474,19 @@ pub struct Config {
     /// new or re-rated stream. `0` means no minimum is enforced. See
     /// `set_min_duration` and issue #340.
     pub min_duration: u64,
+    /// The NGO registry contract used to verify recipients, if configured.
     pub registry: Option<Address>,
+    /// Extra ledgers cancelled stream records are retained for indexing.
     pub cancel_grace_ledgers: u32,
+    /// Lifetime total of all stream deposits and top-ups.
     pub total_donated: i128,
+    /// Lifetime gross total paid out to NGOs.
     pub total_withdrawn: i128,
+    /// Lifetime total protocol fees sent to the treasury.
     pub total_fees_collected: i128,
+    /// The address proposed for the next admin transfer, if any.
     pub pending_admin: Option<Address>,
+    /// Whether the admin has permanently renounced control.
     pub renounced: bool,
     /// The largest deposit or top-up balance a single stream may hold, when
     /// an admin has configured one. `None` means no ceiling is enforced.
@@ -481,13 +588,21 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// The vault has already been initialized and cannot be initialized again.
     AlreadyInitialized = 1,
+    /// The vault has not been initialized yet.
     NotInitialized = 2,
+    /// The requested stream id does not exist.
     StreamNotFound = 3,
+    /// A deposit, rate, or amount was zero or negative.
     InvalidAmount = 4,
+    /// The stream has accrued nothing since its last checkpoint.
     NothingToWithdraw = 5,
+    /// The vault is paused; fund-moving operations are blocked.
     ContractPaused = 6,
+    /// The requested fee exceeds `MAX_FEE_BPS`.
     FeeTooHigh = 7,
+    /// `accept_admin` or `cancel_admin_proposal` was called without a prior pending proposal.
     NoPendingAdmin = 8,
     /// A stream's `balance` or `withdrawn` (or the stream-id counter) would
     /// leave its type's range. Returned instead of letting the release
@@ -501,7 +616,9 @@ pub enum Error {
     /// `set_treasury` was given the vault's own address. Fees paid there
     /// could never be moved out again.
     InvalidTreasury = 11,
+    /// The vault is already paused.
     AlreadyPaused = 12,
+    /// The vault is already unpaused.
     AlreadyUnpaused = 13,
     /// `deposit` was below the configured `min_deposit`.
     DepositTooLow = 14,
@@ -642,16 +759,9 @@ const MAX_START_DELAY_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// keeps the stored record and `created` event small.
 const MAX_MEMO_BYTES: u32 = 32;
 
-/// Approximate ledgers per day at a 5-second close time. Used to express
-/// storage TTLs (which the network counts in ledgers, not wall time) in
-/// human terms.
-const DAY_IN_LEDGERS: u32 = 17_280;
-
-const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
-
-const STREAM_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
-const STREAM_LIFETIME_THRESHOLD: u32 = STREAM_BUMP_AMOUNT - DAY_IN_LEDGERS;
+/// Stream-specific bump and threshold amounts, using the 90-day persistent entry constants.
+const STREAM_BUMP_AMOUNT: u32 = PERSISTENT_BUMP_AMOUNT;
+const STREAM_LIFETIME_THRESHOLD: u32 = PERSISTENT_LIFETIME_THRESHOLD;
 
 /// Keeps the contract instance (admin, config, next-id counter) from being
 /// archived. Called on every state-changing entry point.
@@ -1783,6 +1893,11 @@ impl DonationVault {
             .get(&DataKey::Stream(stream_id))
             .ok_or(Error::StreamNotFound)?;
 
+        // Mirror `settle`: a paused stream accrues nothing.
+        if stream.status == StreamStatus::Paused {
+            return Ok(0);
+        }
+
         let now = env.ledger().timestamp();
         let elapsed = now.saturating_sub(accrual_base(&stream));
         Ok(math::accrued(stream.rate, elapsed, stream.balance))
@@ -1881,9 +1996,14 @@ impl DonationVault {
             .get(&DataKey::Stream(stream_id))
             .ok_or(Error::StreamNotFound)?;
 
-        let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(accrual_base(&stream));
-        let gross = math::accrued(stream.rate, elapsed, stream.balance);
+        // Mirror `settle`: a paused stream accrues nothing.
+        let gross = if stream.status == StreamStatus::Paused {
+            0
+        } else {
+            let now = env.ledger().timestamp();
+            let elapsed = now.saturating_sub(accrual_base(&stream));
+            math::accrued(stream.rate, elapsed, stream.balance)
+        };
         let fee = compute_fee(&env, &stream.token, gross);
         Ok((gross - fee, fee))
     }
@@ -2931,8 +3051,16 @@ impl DonationVault {
         deposit: i128,
         rate: i128,
     ) -> Result<u64, Error> {
-        let memo = Bytes::new(&env);
-        create_stream_inner(env, donor, ngo, token, deposit, rate, None, memo)
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            None,
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream with a cliff: it stays idle until `start`, so nothing
@@ -2991,8 +3119,16 @@ impl DonationVault {
         rate: i128,
         start: u64,
     ) -> Result<u64, Error> {
-        let memo = Bytes::new(&env);
-        create_stream_inner(env, donor, ngo, token, deposit, rate, Some(start), memo)
+        create_stream_inner(
+            env.clone(),
+            donor,
+            ngo,
+            token,
+            deposit,
+            rate,
+            Some(start),
+            Bytes::new(&env),
+        )
     }
 
     /// Creates a stream that begins accruing immediately, tagged with an
