@@ -7247,6 +7247,18 @@ fn streams_by_donor_handles_default_cap() {
 
 /// A fresh 1_000-deposit, 10/s stream created at ledger time 0.
 fn resume_fixture(s: &Setup<'_>) -> u64 {
+// =============================================================================
+// Accrual stops while a stream is paused (issue #450)
+// =============================================================================
+
+/// Moves the ledger clock forward by `secs`.
+fn advance(env: &Env, secs: u64) {
+    env.ledger().with_mut(|l| l.timestamp += secs);
+}
+
+/// A 1_000-token stream at 10/s, so every amount in the pause tests below is
+/// `10 * seconds` and easy to check by eye.
+fn paused_test_stream(s: &Setup) -> u64 {
     s.token_admin.mint(&s.donor, &1_000);
     s.client
         .create_stream(&s.donor, &s.ngo, &s.token.address, &1_000, &10)
@@ -7364,6 +7376,120 @@ fn resume_stream_with_a_future_start_keeps_the_cliff() {
     s.token_admin.mint(&s.donor, &1_000);
     s.env.ledger().with_mut(|l| l.timestamp = 1_000);
     let start = 2_000;
+fn payable_amount_before_during_and_after_a_pause() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // Before: 30s at 10/s is payable.
+    advance(&s.env, 30);
+    assert_eq!(s.client.pending_accrual(&stream_id), 300);
+
+    // Pausing settles what was owed straight to the NGO.
+    assert_eq!(s.client.pause_stream(&stream_id), 300);
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 700);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // During: nothing becomes payable however long the pause lasts.
+    for secs in [1, 49, 50] {
+        advance(&s.env, secs);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        assert_eq!(s.client.pending_payout(&stream_id), (0, 0));
+    }
+    assert_eq!(s.token.balance(&s.ngo), 300);
+    assert_eq!(s.token.balance(&s.client.address), 700);
+
+    // After: accrual restarts from the resume time, not the pause time.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 20);
+    assert_eq!(s.client.pending_accrual(&stream_id), 200);
+
+    assert_eq!(s.client.withdraw(&stream_id), 200);
+    assert_eq!(s.token.balance(&s.ngo), 500);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.balance, 500);
+    assert_eq!(stream.withdrawn, 500);
+    assert_eq!(s.token.balance(&s.client.address), 500);
+}
+
+#[test]
+fn withdraw_is_rejected_while_paused_and_pays_nothing() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 10);
+    s.client.pause_stream(&stream_id);
+    advance(&s.env, 1_000);
+
+    assert_eq!(
+        s.client.try_withdraw(&stream_id),
+        Err(Ok(Error::StreamPaused))
+    );
+    assert_eq!(s.token.balance(&s.ngo), 100);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 900);
+}
+
+#[test]
+fn a_pause_longer_than_the_stream_would_last_does_not_drain_it() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    s.client.pause_stream(&stream_id);
+
+    // 10_000s at 10/s would be ten times the balance if it kept accruing.
+    advance(&s.env, 10_000);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    let stream = s.client.get_stream(&stream_id);
+    assert_eq!(stream.status, StreamStatus::Paused);
+    assert_eq!(stream.balance, 1_000);
+    assert_eq!(s.token.balance(&s.ngo), 0);
+
+    s.client.resume_stream(&stream_id);
+    advance(&s.env, 40);
+    assert_eq!(s.client.pending_accrual(&stream_id), 400);
+}
+
+#[test]
+fn resuming_in_the_same_second_adds_nothing() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+    advance(&s.env, 5);
+
+    assert_eq!(s.client.pause_stream(&stream_id), 50);
+    s.client.resume_stream(&stream_id);
+
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 950);
+    advance(&s.env, 3);
+    assert_eq!(s.client.pending_accrual(&stream_id), 30);
+}
+
+#[test]
+fn repeated_pauses_pay_only_for_the_active_seconds() {
+    let s = setup();
+    let stream_id = paused_test_stream(&s);
+
+    // (active seconds, paused seconds) for three cycles: 10 + 20 + 5 = 35
+    // active seconds in total, 350 tokens.
+    for (active, paused) in [(10u64, 100u64), (20, 7), (5, 3_600)] {
+        advance(&s.env, active);
+        assert_eq!(s.client.pause_stream(&stream_id), 10 * active as i128);
+        advance(&s.env, paused);
+        assert_eq!(s.client.pending_accrual(&stream_id), 0);
+        s.client.resume_stream(&stream_id);
+    }
+
+    assert_eq!(s.token.balance(&s.ngo), 350);
+    assert_eq!(s.client.get_stream(&stream_id).balance, 650);
+    assert_eq!(s.client.get_stream(&stream_id).withdrawn, 350);
+    assert_eq!(s.token.balance(&s.client.address), 650);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+}
+
+#[test]
+fn a_cliff_stream_paused_before_its_start_accrues_from_the_resume_time() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let start = s.env.ledger().timestamp() + 100;
     let stream_id =
         s.client
             .create_stream_with_start(&s.donor, &s.ngo, &s.token.address, &1_000, &10, &start);
@@ -7421,4 +7547,18 @@ fn resume_stream_requires_the_donors_auth() {
     s.client.resume_stream(&stream_id);
     assert_eq!(s.env.auths()[0].0, s.donor);
     assert_eq!(s.client.get_stream(&stream_id).status, StreamStatus::Active);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pause_stream(&stream_id), 0);
+
+    // Sit paused until well after the cliff would have passed.
+    s.env.ledger().with_mut(|l| l.timestamp = start + 50);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+
+    // The cliff is behind us, so only time after the resume counts.
+    s.client.resume_stream(&stream_id);
+    assert_eq!(s.client.pending_accrual(&stream_id), 0);
+    advance(&s.env, 10);
+    assert_eq!(s.client.pending_accrual(&stream_id), 100);
+    assert_eq!(s.client.withdraw(&stream_id), 100);
+    assert_eq!(s.token.balance(&s.ngo), 100);
 }
