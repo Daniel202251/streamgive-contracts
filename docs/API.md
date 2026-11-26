@@ -136,6 +136,7 @@ storage and TTL behavior, see [STORAGE.md](./STORAGE.md).
 requested token and the gross amount paid out, including protocol fees.
 Refunds reduce the committed balance without increasing withdrawn.
 
-After an upgrade, the first request for an unindexed donor and token may scan
-existing streams. The view does not modify storage. The next successful fund
-movement for the pair records the aggregate for future reads.
+New deployments index totals from the first stream. On upgraded deployments,
+an unindexed donor and token are reconstructed by scanning existing stream
+records. The view does not modify storage. The next successful fund movement
+for the pair records the aggregate for future reads.

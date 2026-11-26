@@ -2332,7 +2332,15 @@ fn donor_totals_reads_legacy_streams_and_indexes_them_on_next_write() {
 
     let key = DataKey::DonorTotals(donor.clone(), token.clone());
     s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .remove(&DataKey::DonorTotalsIndexedFromStart);
         s.env.storage().persistent().remove(&key);
+        s.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::DonorStreamCount(donor.clone()));
     });
     let old = s.client.donor_totals(donor, token);
     assert_eq!(old.committed, 900);

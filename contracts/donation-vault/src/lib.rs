@@ -455,6 +455,8 @@ pub enum DataKey {
     MinDuration,
     /// Indexed committed and gross withdrawn totals for a donor and token.
     DonorTotals(Address, Address),
+    /// Present if every stream was created with donor totals indexing enabled.
+    DonorTotalsIndexedFromStart,
 }
 
 #[contracterror]
@@ -752,30 +754,17 @@ fn read_donor_totals(
     }
 
     let mut totals = DonorTotals::default();
-    let mut remaining: u64 = storage
-        .get(&DataKey::DonorStreamCount(donor.clone()))
-        .unwrap_or(0);
-    if remaining == 0 {
+    let instance = env.storage().instance();
+    if instance.has(&DataKey::DonorTotalsIndexedFromStart) {
         return Ok(totals);
     }
-    let total: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::NextStreamId)
-        .unwrap_or(0);
+    let total: u64 = instance.get(&DataKey::NextStreamId).unwrap_or(0);
     for id in 0..total {
         let Some(stream) = storage.get::<_, Stream>(&DataKey::Stream(id)) else {
             continue;
         };
-        if stream.donor != *donor {
-            continue;
-        }
-        if stream.token == *token {
+        if stream.donor == *donor && stream.token == *token {
             totals = adjust_donor_totals(totals, stream.balance, stream.withdrawn)?;
-        }
-        remaining -= 1;
-        if remaining == 0 {
-            break;
         }
     }
     Ok(totals)
@@ -1336,6 +1325,9 @@ impl DonationVault {
     pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorTotalsIndexedFromStart, &true);
         env.storage().instance().set(&DataKey::MinDeposit, &0i128);
         env.storage().instance().set(&DataKey::TotalDonated, &0i128);
         env.storage()
@@ -1376,6 +1368,9 @@ impl DonationVault {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextStreamId, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::DonorTotalsIndexedFromStart, &true);
         env.storage().instance().set(&DataKey::MinDeposit, &0i128);
         env.storage().instance().set(&DataKey::TotalDonated, &0i128);
         env.storage()
