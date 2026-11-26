@@ -304,6 +304,13 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
+    /// The owner that claimed an NGO name, keyed by the SHA-256 of the exact
+    /// name bytes (a name can be up to 200 bytes, close to the 250-byte
+    /// ledger key limit, so the name itself is not used as the key).
+    /// Maintained by `register`, `update_name` and the removal entry points
+    /// and read by `owner_by_name`. New variants are appended: never reorder
+    /// this enum.
+    OwnerByName(BytesN<32>),
     /// Whether new NGO registrations are paused by the admin.
     /// `true` while `pause_registrations` is in effect; absent or `false`
     /// means registrations are open. See `pause_registrations` / `resume_registrations`.
@@ -405,6 +412,45 @@ fn extend_owner_index_ttl(env: &Env, index: u32, owner: &Address) {
         NGO_LIFETIME_THRESHOLD,
         NGO_BUMP_AMOUNT,
     );
+}
+
+/// The name-index key for `name`: the SHA-256 of its bytes.
+fn name_key(env: &Env, name: &String) -> DataKey {
+    let bytes: Bytes = name.into();
+    DataKey::OwnerByName(env.crypto().sha256(&bytes).to_bytes())
+}
+
+fn extend_name_index_ttl(env: &Env, name: &String) {
+    let key = name_key(env, name);
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, NGO_LIFETIME_THRESHOLD, NGO_BUMP_AMOUNT);
+    }
+}
+
+/// Points `name` at `owner` in the name index, unless another owner already
+/// holds the name: the first claimant keeps it until it renames or leaves,
+/// and a later registrant with the same name is simply not indexed. (Names are
+/// not unique yet; this keeps the index from silently flipping between
+/// owners until they are.)
+fn index_name(env: &Env, name: &String, owner: &Address) {
+    let key = name_key(env, name);
+    if !env.storage().persistent().has(&key) {
+        env.storage().persistent().set(&key, owner);
+    }
+    if env.storage().persistent().get::<_, Address>(&key).as_ref() == Some(owner) {
+        extend_name_index_ttl(env, name);
+    }
+}
+
+/// Removes `name` from the name index, but only when `owner` is the one it
+/// points at, so an owner leaving never clears another owner's claim.
+fn unindex_name(env: &Env, name: &String, owner: &Address) {
+    let key = name_key(env, name);
+    if env.storage().persistent().get::<_, Address>(&key).as_ref() == Some(owner) {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 fn get_owner_count(env: &Env) -> u32 {
@@ -721,6 +767,20 @@ fn delete_ngo_entry(env: &Env, owner: &Address) -> Result<(), Error> {
         .unwrap_or(0);
     let new_ngo_count = count.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
 
+    // Keep `verified_count` and the name index in step with the entry being
+    // removed.
+    if let Some(ngo) = env
+        .storage()
+        .persistent()
+        .get::<_, Ngo>(&DataKey::Ngo(owner.clone()))
+    {
+        unindex_name(env, &ngo.name, owner);
+        if ngo.verified {
+            let verified = get_verified_count(env);
+            let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
+            set_verified_count(env, new_verified);
+        }
+    }
     // Keep `verified_count` in step with the entry being removed, and
     // capture the name before we delete the entry so we can free it below.
     let maybe_name: Option<String> = env
@@ -1188,6 +1248,7 @@ impl NgoRegistry {
             .persistent()
             .set(&DataKey::IndexByOwner(owner.clone()), &index);
         set_owner_count(&env, new_count);
+        index_name(&env, &name, &owner);
 
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &owner);
@@ -1647,6 +1708,7 @@ impl NgoRegistry {
 
         // Only update and emit event if the name actually changes
         if ngo.name != name {
+            unindex_name(&env, &ngo.name, &owner);
             // Check the new name is not already claimed by someone else.
             let new_name_key = canonical_name_key(&env, &name);
             if env
@@ -1670,6 +1732,7 @@ impl NgoRegistry {
 
             ngo.name = name.clone();
             env.storage().persistent().set(&key, &ngo);
+            index_name(&env, &name, &owner);
             extend_instance_ttl(&env);
             extend_ngo_ttl(&env, &owner);
             RenamedEvent { owner, name }.publish(&env);
@@ -1740,6 +1803,37 @@ impl NgoRegistry {
         }
 
         Ok(())
+    }
+
+    /// Looks up the owner of the NGO registered under `name`, without listing
+    /// the registry. Read-only and unauthenticated.
+    ///
+    /// Returns `None` when no registered NGO holds the name. The match is on
+    /// the exact name string (case and whitespace included). The lookup is
+    /// backed by an index that `register`, `update_name`, `unregister`,
+    /// `remove_ngo` and `reject_ngo` keep in step, so a renamed NGO is found
+    /// under its new name only, and a name is free again once its NGO leaves.
+    /// If two NGOs register the same name (names are not unique yet), the
+    /// first one keeps the name and the other is not indexed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryClient};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let contract_id = env.register(NgoRegistry, ());
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// # let admin = Address::generate(&env);
+    /// # client.init(&admin);
+    /// # let owner = Address::generate(&env);
+    /// let name = String::from_str(&env, "Example NGO");
+    /// client.register(&owner, &name);
+    /// assert_eq!(client.owner_by_name(&name), Some(owner));
+    /// ```
+    pub fn owner_by_name(env: Env, name: String) -> Option<Address> {
+        env.storage().persistent().get(&name_key(&env, &name))
     }
 
     /// Reads back an NGO's metadata URI, or `None` when it has none set.
@@ -2328,11 +2422,22 @@ impl NgoRegistry {
     /// client.touch_ngo(&owner);
     /// ```
     pub fn touch_ngo(env: Env, owner: Address) -> Result<(), Error> {
-        if !env.storage().persistent().has(&DataKey::Ngo(owner.clone())) {
-            return Err(Error::NotRegistered);
-        }
+        let ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ngo(owner.clone()))
+            .ok_or(Error::NotRegistered)?;
         extend_instance_ttl(&env);
         extend_ngo_ttl(&env, &owner);
+        if env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&name_key(&env, &ngo.name))
+            .as_ref()
+            == Some(&owner)
+        {
+            extend_name_index_ttl(&env, &ngo.name);
+        }
         if let Some(index) = env
             .storage()
             .persistent()

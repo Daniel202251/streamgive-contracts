@@ -66,6 +66,7 @@ eligible for archival.
 | `NgoCount` | Instance | 30d / 29d | Lifetime count of NGO registrations. |
 | `TotalNgos` | Instance | 30d / 29d | Reserved legacy key retained for storage-layout compatibility; callers use `NgoCount`. |
 | `Ngo(Address)` | Persistent | 90d / 89d | One NGO's registry entry (name, verified flag), keyed by its owner address. |
+| `OwnerByName(String)` | Persistent | 90d / 89d | The owner that claimed an NGO name, read by `owner_by_name`. Set by `register` and `update_name`, cleared by `update_name`, `unregister`, `remove_ngo` and `reject_ngo`; refreshed by `touch_ngo`. |
 | `OwnerIndexCount` | Instance | 30d / 29d | Current number of owners in the registry index. |
 | `OwnerByIndex(u32)` | Persistent | 90d / 89d | Owner address at an index in registration order. |
 | `IndexByOwner(Address)` | Persistent | 90d / 89d | Reverse index from owner address to its registration index. |

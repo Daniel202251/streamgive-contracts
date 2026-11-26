@@ -154,6 +154,7 @@ for what works while the vault is paused, and the
 | `list_ngos` | Anyone | View. |
 | `list_ngos_page` | Anyone | View. |
 | `metadata_uri` | Anyone | View. |
+| `owner_by_name` | Anyone | View. |
 | `categories` | Anyone | View. |
 | `get_ngo` | Anyone | View. |
 | `is_verified` | Anyone | View. |
