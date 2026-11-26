@@ -10,7 +10,22 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ## [Unreleased]
 
+### Changed
+
+- `donation-vault`: split `lib.rs` into `events.rs`, `types.rs`, and `storage.rs` modules. No behaviour change. See issue #393.
+
 ### Added
+
+- `ngo-registry`: `VerificationStatus` enum and `verification_status(owner)` view that distinguishes Unknown/Pending/Verified/Expired/Revoked. Closes #448.
+
+### Added
+
+- `donation-vault`, `ngo-registry`: configure `[workspace.lints]` with
+  `rustc::missing_docs = warn` and `clippy::all = warn`; opt both contract
+  crates in via `[lints] workspace = true`. Add crate-level doc comments and
+  document all previously undocumented public items; annotate self-evident
+  `#[contractevent]` fields with `#[allow(missing_docs)]` to avoid boilerplate
+  prose.
 
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
   several streams in one transaction, with one authorization and one refund
