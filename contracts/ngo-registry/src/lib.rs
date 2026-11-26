@@ -10,6 +10,11 @@ use soroban_sdk::{
     Env, String, Vec,
 };
 
+use common::{
+    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+    PERSISTENT_LIFETIME_THRESHOLD,
+};
+
 /// Event emitted when an NGO registers.
 #[contractevent(topics = ["register"], data_format = "single-value")]
 #[allow(missing_docs)]
@@ -108,6 +113,29 @@ pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when an upgrade is proposed.
+#[contractevent(topics = ["uppropose"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct UpgradeProposedEvent {
+    #[topic]
+    pub new_wasm_hash: BytesN<32>,
+    pub executable_at: u64,
+}
+
+/// Event emitted when a proposed upgrade is cancelled.
+#[contractevent(topics = ["upcancel"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct UpgradeCancelledEvent {
+    pub new_wasm_hash: BytesN<32>,
+}
+
+/// Event emitted when the upgrade delay is set.
+#[contractevent(topics = ["updelay"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct UpgradeDelaySetEvent {
+    pub delay: u64,
+}
+
 /// Event emitted when an approver is added.
 #[contractevent(topics = ["apadd"], data_format = "single-value")]
 #[allow(missing_docs)]
@@ -152,6 +180,33 @@ pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
+/// Event emitted when an ownership transfer is proposed.
+#[contractevent(topics = ["ownprop"], data_format = "vec")]
+#[allow(missing_docs)]
+pub struct OwnershipProposedEvent {
+    #[topic]
+    pub current_owner: Address,
+    pub new_owner: Address,
+}
+
+/// Event emitted when an ownership transfer is accepted.
+#[contractevent(topics = ["ownaccpt"], data_format = "vec")]
+#[allow(missing_docs)]
+pub struct OwnershipAcceptedEvent {
+    #[topic]
+    pub old_owner: Address,
+    pub new_owner: Address,
+}
+
+/// Event emitted when an ownership transfer is cancelled.
+#[contractevent(topics = ["owncancel"], data_format = "single-value")]
+#[allow(missing_docs)]
+pub struct OwnershipCancelledEvent {
+    #[topic]
+    pub owner: Address,
+    pub data: (),
+}
+
 #[contracttype]
 // Debug and PartialEq let tests assert_eq! on a try_* callâ€™s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
@@ -175,6 +230,10 @@ pub struct Ngo {
     /// reaches it the entry is treated as unverified by `is_verified` and
     /// `get_ngo`, until an admin renews it. See issue #348.
     pub verified_until: Option<u64>,
+    /// Optional pending new owner address. Set by `propose_owner_transfer` and
+    /// cleared by `accept_owner_transfer` or `cancel_owner_transfer`. `None` means
+    /// no ownership transfer is pending.
+    pub pending_owner: Option<Address>,
 }
 
 /// The verification state of an NGO owner address, returned by `verification_status`.
@@ -212,6 +271,17 @@ pub struct NgoOwnerPage {
     pub next: u32,
 }
 
+/// A contract upgrade recorded by `propose_upgrade`, awaiting the timelock
+/// before `execute_upgrade` may carry it out.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingUpgrade {
+    /// The Wasm hash the contract will be upgraded to on execution.
+    pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp at or after which `execute_upgrade` may run.
+    pub executable_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub enum DataKey {
@@ -245,6 +315,13 @@ pub enum DataKey {
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
     VerifyPeriod,
+    /// Seconds that must elapse between `propose_upgrade` and
+    /// `execute_upgrade`. Zero (or absent) means the timelock is disabled and
+    /// the immediate `upgrade` entry point is allowed.
+    UpgradeDelay,
+    /// The upgrade recorded by `propose_upgrade` and not yet executed or
+    /// cancelled. Absent means no upgrade is pending.
+    PendingUpgrade,
 }
 
 #[contracterror]
@@ -288,6 +365,16 @@ pub enum Error {
     /// `renew_ngo` was called while no verification period is configured, so
     /// there is no expiry to extend. Set one with `set_verify_period`.
     NoVerifyPeriod = 15,
+    /// `execute_upgrade` or `cancel_upgrade` was called with no upgrade
+    /// proposed.
+    NoPendingUpgrade = 16,
+    /// `execute_upgrade` was called before the proposed upgrade's timelock
+    /// elapsed.
+    UpgradeDelayNotElapsed = 17,
+    /// The immediate `upgrade` entry point was called while a non-zero
+    /// `upgrade_delay` is configured: upgrades must go through
+    /// `propose_upgrade` / `execute_upgrade`.
+    UpgradeTimelockEnabled = 18,
     // Error numbers are append-only: never renumber, reuse, or remove a
     // variant. New errors take the next unused number. See
     // docs/UPGRADE_POLICY.md.
@@ -310,16 +397,9 @@ pub const MAX_METADATA_URI_LEN: u32 = 512;
 /// pagination bounded.
 pub const MAX_LIST_LIMIT: u32 = 50;
 
-/// Approximate ledgers per day at a 5-second close time. Used to express
-/// storage TTLs (which the network counts in ledgers, not wall time) in
-/// human terms.
-const DAY_IN_LEDGERS: u32 = 17_280;
-
-const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
-
-const NGO_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
-const NGO_LIFETIME_THRESHOLD: u32 = NGO_BUMP_AMOUNT - DAY_IN_LEDGERS;
+/// NGO-specific bump and threshold amounts, using the 90-day persistent entry constants.
+const NGO_BUMP_AMOUNT: u32 = PERSISTENT_BUMP_AMOUNT;
+const NGO_LIFETIME_THRESHOLD: u32 = PERSISTENT_LIFETIME_THRESHOLD;
 
 fn extend_instance_ttl(env: &Env) {
     env.storage()
@@ -380,6 +460,15 @@ fn get_verify_period(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&DataKey::VerifyPeriod)
+        .unwrap_or(0)
+}
+
+/// Reads the admin-configured upgrade timelock, in seconds. Defaults to zero
+/// (timelock disabled) when an admin has not set one.
+fn get_upgrade_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::UpgradeDelay)
         .unwrap_or(0)
 }
 
@@ -895,6 +984,7 @@ impl NgoRegistry {
             verified: false,
             metadata_uri: None,
             verified_until: None,
+            pending_owner: None,
         };
         env.storage().persistent().set(&key, &ngo);
 
@@ -1963,6 +2053,11 @@ impl NgoRegistry {
     /// Lets a bug fix be deployed without changing the contract address,
     /// preserving every existing NGO entry and the admin key.
     ///
+    /// Only allowed while the upgrade timelock is explicitly disabled (the
+    /// configured `upgrade_delay` is zero). With a non-zero delay, upgrades
+    /// must go through `propose_upgrade` / `execute_upgrade` to provide a
+    /// warning period; this returns `Error::UpgradeTimelockEnabled` otherwise.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -1979,9 +2074,258 @@ impl NgoRegistry {
     /// ```
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         require_admin(&env)?;
+        if get_upgrade_delay(&env) != 0 {
+            return Err(Error::UpgradeTimelockEnabled);
+        }
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
+        extend_instance_ttl(&env);
         UpgradedEvent { new_wasm_hash }.publish(&env);
+        Ok(())
+    }
+
+    /// Reads the configured upgrade delay in seconds. `0` means the timelock
+    /// is disabled and the immediate `upgrade` entry point is allowed.
+    pub fn upgrade_delay(env: Env) -> u64 {
+        get_upgrade_delay(&env)
+    }
+
+    /// Reads the upgrade proposed by `propose_upgrade`, if one is awaiting its
+    /// timelock. `None` when nothing is pending.
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Sets how many seconds must pass between `propose_upgrade` and
+    /// `execute_upgrade`. Admin-gated; emits an `updelay` event. Setting it to
+    /// zero explicitly disables the timelock and re-enables the immediate
+    /// `upgrade` entry point.
+    pub fn set_upgrade_delay(env: Env, delay: u64) -> Result<(), Error> {
+        require_admin(&env)?;
+        env.storage().instance().set(&DataKey::UpgradeDelay, &delay);
+        extend_instance_ttl(&env);
+
+        UpgradeDelaySetEvent { delay }.publish(&env);
+
+        Ok(())
+    }
+
+    /// Starts a timelocked upgrade by recording `new_wasm_hash` as pending, to
+    /// be carried out by `execute_upgrade` no earlier than the configured
+    /// `upgrade_delay` seconds from now. Admin-gated; emits an `uppropose`
+    /// event. Proposing again replaces any pending proposal and restarts the
+    /// timer.
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        require_admin(&env)?;
+        let delay = get_upgrade_delay(&env);
+        let executable_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(delay)
+            .ok_or(Error::ArithmeticOverflow)?;
+        env.storage().instance().set(
+            &DataKey::PendingUpgrade,
+            &PendingUpgrade {
+                new_wasm_hash: new_wasm_hash.clone(),
+                executable_at,
+            },
+        );
+        extend_instance_ttl(&env);
+
+        UpgradeProposedEvent {
+            new_wasm_hash,
+            executable_at,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Carries out the upgrade proposed by `propose_upgrade`, replacing the
+    /// contract's Wasm bytecode in place. Admin-gated; emits an `upgrade`
+    /// event. Fails with `NoPendingUpgrade` when nothing is proposed, and with
+    /// `UpgradeDelayNotElapsed` before the timelock has elapsed.
+    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::NoPendingUpgrade)?;
+        if env.ledger().timestamp() < pending.executable_at {
+            return Err(Error::UpgradeDelayNotElapsed);
+        }
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.deployer()
+            .update_current_contract_wasm(pending.new_wasm_hash.clone());
+        extend_instance_ttl(&env);
+
+        UpgradedEvent {
+            new_wasm_hash: pending.new_wasm_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels the upgrade proposed by `propose_upgrade`. Admin-gated; emits
+    /// an `upcancel` event. Fails with `NoPendingUpgrade` when nothing is
+    /// proposed.
+    pub fn cancel_upgrade(env: Env) -> Result<(), Error> {
+        require_admin(&env)?;
+        let pending: PendingUpgrade = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::NoPendingUpgrade)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        extend_instance_ttl(&env);
+
+        UpgradeCancelledEvent {
+            new_wasm_hash: pending.new_wasm_hash,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Proposes a new owner for the NGO entry. The current owner initiates the
+    /// transfer, and the new owner must accept it via `accept_owner_transfer`.
+    /// The verified status is preserved through the transfer. Owner-gated; emits
+    /// an `ownprop` event.
+    pub fn propose_owner_transfer(env: Env, current_owner: Address, new_owner: Address) -> Result<(), Error> {
+        current_owner.require_auth();
+
+        if current_owner == new_owner {
+            return Err(Error::InvalidAdmin); // Reusing error for invalid transfer
+        }
+
+        let key = DataKey::Ngo(current_owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        ngo.pending_owner = Some(new_owner.clone());
+        env.storage().persistent().set(&key, &ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &current_owner);
+
+        OwnershipProposedEvent {
+            current_owner,
+            new_owner,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Accepts a proposed ownership transfer. The new owner (pending_owner) must
+    /// call this to complete the transfer. The NGO entry is moved to be keyed by
+    /// the new owner's address, and the verified status is preserved. Emits an
+    /// `ownaccpt` event.
+    pub fn accept_owner_transfer(env: Env, old_owner: Address, new_owner: Address) -> Result<(), Error> {
+        new_owner.require_auth();
+
+        let old_key = DataKey::Ngo(old_owner.clone());
+        let ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .ok_or(Error::NotRegistered)?;
+
+        // Verify the new_owner matches the pending_owner
+        if ngo.pending_owner != Some(new_owner.clone()) {
+            return Err(Error::NoPendingAdmin); // Reusing error for no pending transfer
+        }
+
+        // Check if new_owner already has an NGO registered
+        let new_key = DataKey::Ngo(new_owner.clone());
+        if env.storage().persistent().has(&new_key) {
+            return Err(Error::AlreadyRegistered);
+        }
+
+        // Create the new entry with updated owner and no pending_owner
+        let updated_ngo = Ngo {
+            owner: new_owner.clone(),
+            name: ngo.name.clone(),
+            verified: ngo.verified,
+            metadata_uri: ngo.metadata_uri.clone(),
+            verified_until: ngo.verified_until,
+            pending_owner: None,
+        };
+
+        // Remove the old entry
+        env.storage().persistent().remove(&old_key);
+
+        // Update the owner index
+        if let Some(index) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::IndexByOwner(old_owner.clone()))
+        {
+            env.storage()
+                .persistent()
+                .set(&DataKey::OwnerByIndex(index), &new_owner);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::IndexByOwner(old_owner.clone()));
+            env.storage()
+                .persistent()
+                .set(&DataKey::IndexByOwner(new_owner.clone()), &index);
+            extend_owner_index_ttl(&env, index, &new_owner);
+        }
+
+        // Store the new entry
+        env.storage().persistent().set(&new_key, &updated_ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &new_owner);
+
+        // Update vault expectations: the vault will need to handle this
+        // by allowing withdrawals to either the old or new owner during a grace period
+        // or by having the NGO update their payout address
+
+        OwnershipAcceptedEvent {
+            old_owner,
+            new_owner,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels a pending ownership transfer. The current owner can call this to
+    /// withdraw the proposal. Emits an `owncancel` event.
+    pub fn cancel_owner_transfer(env: Env, owner: Address) -> Result<(), Error> {
+        owner.require_auth();
+
+        let key = DataKey::Ngo(owner.clone());
+        let mut ngo: Ngo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::NotRegistered)?;
+
+        if ngo.pending_owner.is_none() {
+            return Err(Error::NoPendingAdmin); // Reusing error for no pending transfer
+        }
+
+        ngo.pending_owner = None;
+        env.storage().persistent().set(&key, &ngo);
+
+        extend_instance_ttl(&env);
+        extend_ngo_ttl(&env, &owner);
+
+        OwnershipCancelledEvent {
+            owner,
+            data: (),
+        }
+        .publish(&env);
+
         Ok(())
     }
 }

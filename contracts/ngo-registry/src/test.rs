@@ -3189,3 +3189,399 @@ fn list_ngos_handles_removed_entries_correctly() {
         assert_ne!(owner, middle_owner);
     }
 }
+
+#[test]
+fn upgrade_with_timelock_disabled_succeeds() {
+    let (env, client, _admin) = setup();
+    let new_wasm_hash = env.deployer().upload_contract_wasm(Bytes::new(&env));
+    
+    // Default upgrade_delay is 0, so immediate upgrade should work
+    client.upgrade(&new_wasm_hash);
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("upgrade"),)
+    );
+}
+
+#[test]
+fn upgrade_with_timelock_enabled_fails() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let new_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let result = client.try_upgrade(&new_wasm_hash);
+    
+    assert_eq!(result, Err(Ok(Error::UpgradeTimelockEnabled)));
+}
+
+#[test]
+fn set_upgrade_delay_stores_delay_and_publishes_event() {
+    let (env, client, _admin) = setup();
+    
+    client.set_upgrade_delay(&3_600);
+    
+    assert_eq!(client.upgrade_delay(), 3_600);
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("updelay"),)
+    );
+}
+
+#[test]
+fn propose_upgrade_records_pending_and_publishes_event() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let new_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+    
+    client.propose_upgrade(&new_wasm_hash);
+    
+    let pending = client.pending_upgrade().expect("a proposal is pending");
+    assert_eq!(pending.new_wasm_hash, new_wasm_hash);
+    assert_eq!(pending.executable_at, 4_600);
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("uppropose"), new_wasm_hash.clone())
+    );
+}
+
+#[test]
+fn propose_upgrade_replaces_previous_proposal() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let first = BytesN::from_array(&env, &[1u8; 32]);
+    let second = BytesN::from_array(&env, &[2u8; 32]);
+    
+    client.propose_upgrade(&first);
+    env.ledger().with_mut(|l| l.timestamp = 1_500);
+    client.propose_upgrade(&second);
+    
+    let pending = client.pending_upgrade().expect("a proposal is pending");
+    assert_eq!(pending.new_wasm_hash, second);
+    assert_eq!(pending.executable_at, 5_100);
+}
+
+#[test]
+fn propose_upgrade_requires_admin() {
+    let (env, client, _admin) = setup();
+    let new_wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+    
+    env.mock_auths(&[]);
+    assert!(client.try_propose_upgrade(&new_wasm_hash).is_err());
+}
+
+#[test]
+fn execute_upgrade_before_delay_elapsed_fails() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let new_wasm_hash = env.deployer().upload_contract_wasm(Bytes::new(&env));
+    
+    client.propose_upgrade(&new_wasm_hash);
+    
+    let result = client.try_execute_upgrade();
+    assert_eq!(result, Err(Ok(Error::UpgradeDelayNotElapsed)));
+}
+
+#[test]
+fn execute_upgrade_after_delay_elapsed_succeeds() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let new_wasm_hash = env.deployer().upload_contract_wasm(Bytes::new(&env));
+    
+    client.propose_upgrade(&new_wasm_hash);
+    env.ledger().with_mut(|l| l.timestamp = 4_600);
+    
+    client.execute_upgrade();
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("upgrade"),)
+    );
+    assert!(client.pending_upgrade().is_none());
+}
+
+#[test]
+fn execute_upgrade_without_proposal_fails() {
+    let (_env, client, _admin) = setup();
+    
+    let result = client.try_execute_upgrade();
+    assert_eq!(result, Err(Ok(Error::NoPendingUpgrade)));
+}
+
+#[test]
+fn execute_upgrade_requires_admin() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&1);
+    let new_wasm_hash = env.deployer().upload_contract_wasm(Bytes::new(&env));
+    client.propose_upgrade(&new_wasm_hash);
+    env.ledger().with_mut(|l| l.timestamp = 1_001);
+    
+    env.mock_auths(&[]);
+    assert!(client.try_execute_upgrade().is_err());
+}
+
+#[test]
+fn cancel_upgrade_clears_pending_and_publishes_event() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    
+    let new_wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
+    
+    client.propose_upgrade(&new_wasm_hash);
+    client.cancel_upgrade();
+    
+    assert!(client.pending_upgrade().is_none());
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("upcancel"),)
+    );
+}
+
+#[test]
+fn cancel_upgrade_without_proposal_fails() {
+    let (_env, client, _admin) = setup();
+    
+    let result = client.try_cancel_upgrade();
+    assert_eq!(result, Err(Ok(Error::NoPendingUpgrade)));
+}
+
+#[test]
+fn cancel_upgrade_requires_admin() {
+    let (env, client, _admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.set_upgrade_delay(&3_600);
+    let new_wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.propose_upgrade(&new_wasm_hash);
+    
+    env.mock_auths(&[]);
+    assert!(client.try_cancel_upgrade().is_err());
+}
+
+#[test]
+fn upgrade_preserves_ngo_entries_after_timelocked_upgrade() {
+    let (env, client, admin) = setup();
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    
+    let owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    client.register(&owner, &name);
+    client.approve_ngo(&admin, &owner);
+    
+    client.set_upgrade_delay(&100);
+    let new_wasm_hash = env.deployer().upload_contract_wasm(Bytes::new(&env));
+    client.propose_upgrade(&new_wasm_hash);
+    
+    env.ledger().with_mut(|l| l.timestamp = 1_100);
+    client.execute_upgrade();
+    
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.name, name);
+    assert!(ngo.verified);
+}
+
+#[test]
+fn propose_owner_transfer_sets_pending_owner() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&old_owner, &name);
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    
+    let ngo = client.get_ngo(&old_owner);
+    assert_eq!(ngo.pending_owner, Some(new_owner.clone()));
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("ownprop"), old_owner.clone())
+    );
+}
+
+#[test]
+fn accept_owner_transfer_moves_entry_and_preserves_verified() {
+    let (env, client, admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&old_owner, &name);
+    client.approve_ngo(&admin, &old_owner);
+    
+    assert!(client.get_ngo(&old_owner).verified);
+    
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    client.accept_owner_transfer(&old_owner, &new_owner);
+    
+    // Old owner entry should be gone
+    assert!(client.try_get_ngo(&old_owner).is_err());
+    
+    // New owner should have the entry with verified status preserved
+    let ngo = client.get_ngo(&new_owner);
+    assert_eq!(ngo.owner, new_owner);
+    assert_eq!(ngo.name, name);
+    assert!(ngo.verified);
+    assert_eq!(ngo.pending_owner, None);
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("ownaccpt"), old_owner.clone())
+    );
+}
+
+#[test]
+fn accept_owner_transfer_requires_pending_match() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let wrong_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&old_owner, &name);
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    
+    // Trying to accept with wrong address should fail
+    let result = client.try_accept_owner_transfer(&old_owner, &wrong_owner);
+    assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
+}
+
+#[test]
+fn accept_owner_transfer_fails_if_new_owner_already_registered() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name1 = String::from_str(&env, "Test NGO 1");
+    let name2 = String::from_str(&env, "Test NGO 2");
+    
+    client.register(&old_owner, &name1);
+    client.register(&new_owner, &name2);
+    
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    
+    let result = client.try_accept_owner_transfer(&old_owner, &new_owner);
+    assert_eq!(result, Err(Ok(Error::AlreadyRegistered)));
+}
+
+#[test]
+fn cancel_owner_transfer_clears_pending() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&old_owner, &name);
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    
+    assert!(client.get_ngo(&old_owner).pending_owner.is_some());
+    
+    client.cancel_owner_transfer(&old_owner);
+    
+    assert_eq!(client.get_ngo(&old_owner).pending_owner, None);
+    
+    assert_eq!(
+        env.events().all().last().unwrap().topics,
+        (symbol_short!("owncancel"), old_owner.clone())
+    );
+}
+
+#[test]
+fn cancel_owner_transfer_without_pending_fails() {
+    let (env, client, _admin) = setup();
+    
+    let owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&owner, &name);
+    
+    let result = client.try_cancel_owner_transfer(&owner);
+    assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
+}
+
+#[test]
+fn propose_owner_transfer_to_self_fails() {
+    let (env, client, _admin) = setup();
+    
+    let owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&owner, &name);
+    
+    let result = client.try_propose_owner_transfer(&owner, &owner);
+    assert_eq!(result, Err(Ok(Error::InvalidAdmin)));
+}
+
+#[test]
+fn propose_owner_transfer_replaces_previous_proposal() {
+    let (env, client, _admin) = setup();
+    
+    let owner = Address::generate(&env);
+    let new_owner1 = Address::generate(&env);
+    let new_owner2 = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&owner, &name);
+    client.propose_owner_transfer(&owner, &new_owner1);
+    client.propose_owner_transfer(&owner, &new_owner2);
+    
+    let ngo = client.get_ngo(&owner);
+    assert_eq!(ngo.pending_owner, Some(new_owner2));
+}
+
+#[test]
+fn accept_owner_transfer_preserves_metadata_uri() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    let metadata_uri = Some(String::from_str(&env, "https://example.com"));
+    
+    client.register(&old_owner, &name);
+    client.set_metadata_uri(&old_owner, &metadata_uri);
+    
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    client.accept_owner_transfer(&old_owner, &new_owner);
+    
+    let ngo = client.get_ngo(&new_owner);
+    assert_eq!(ngo.metadata_uri, metadata_uri);
+}
+
+#[test]
+fn ownership_transfer_updates_index_correctly() {
+    let (env, client, _admin) = setup();
+    
+    let old_owner = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+    let name = String::from_str(&env, "Test NGO");
+    
+    client.register(&old_owner, &name);
+    
+    // Check old owner is in the list
+    let owners = client.list_ngos(&0, &10);
+    assert!(owners.contains(&old_owner));
+    
+    client.propose_owner_transfer(&old_owner, &new_owner);
+    client.accept_owner_transfer(&old_owner, &new_owner);
+    
+    // New owner should be in the list, old owner should not
+    let owners = client.list_ngos(&0, &10);
+    assert!(owners.contains(&new_owner));
+    assert!(!owners.contains(&old_owner));
+}

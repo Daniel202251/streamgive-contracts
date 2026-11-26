@@ -11,6 +11,11 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Vec,
 };
 
+use common::{
+    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+    PERSISTENT_LIFETIME_THRESHOLD,
+};
+
 /// Event emitted when a new admin is proposed.
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
 #[allow(missing_docs)]
@@ -738,16 +743,9 @@ const MAX_START_DELAY_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// keeps the stored record and `created` event small.
 const MAX_MEMO_BYTES: u32 = 32;
 
-/// Approximate ledgers per day at a 5-second close time. Used to express
-/// storage TTLs (which the network counts in ledgers, not wall time) in
-/// human terms.
-const DAY_IN_LEDGERS: u32 = 17_280;
-
-const INSTANCE_BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
-
-const STREAM_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
-const STREAM_LIFETIME_THRESHOLD: u32 = STREAM_BUMP_AMOUNT - DAY_IN_LEDGERS;
+/// Stream-specific bump and threshold amounts, using the 90-day persistent entry constants.
+const STREAM_BUMP_AMOUNT: u32 = PERSISTENT_BUMP_AMOUNT;
+const STREAM_LIFETIME_THRESHOLD: u32 = PERSISTENT_LIFETIME_THRESHOLD;
 
 /// Keeps the contract instance (admin, config, next-id counter) from being
 /// archived. Called on every state-changing entry point.
