@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+//! NGO registry contract for the StreamGive protocol.
+//!
+//! Maintains a registry of registered and verified non-governmental organisations
+//! (NGOs). Admins and approvers can approve, reject, revoke, and renew entries;
+//! the registry is queried by the donation-vault contract before a stream is opened.
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
@@ -6,123 +11,161 @@ use soroban_sdk::{
 };
 
 use common::{
-    DAY_IN_LEDGERS, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+    INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
     PERSISTENT_LIFETIME_THRESHOLD,
 };
 
+/// Event emitted when an NGO registers.
 #[contractevent(topics = ["register"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RegisterEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO renames its pending application.
 #[contractevent(topics = ["renamed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenamedEvent {
     #[topic]
     pub owner: Address,
     pub name: String,
 }
 
+/// Event emitted when an NGO is approved.
 #[contractevent(topics = ["approved"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApprovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO's verification is revoked.
 #[contractevent(topics = ["revoked"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RevokedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO unregisters itself.
 #[contractevent(topics = ["unregist"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UnregisteredEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an admin removes an NGO entry.
 #[contractevent(topics = ["removed"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RemovedEvent {
     #[topic]
     pub owner: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO application is rejected.
 #[contractevent(topics = ["rejected"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RejectedEvent {
     #[topic]
     pub owner: Address,
     pub reason_code: u32,
 }
 
+/// Event emitted when a new admin is proposed.
 #[contractevent(topics = ["propadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ProposedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when a proposed admin accepts the role.
 #[contractevent(topics = ["acptadmin"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct AcceptedAdminEvent {
     pub admin: Address,
 }
 
+/// Event emitted when an admin proposal is cancelled.
 #[contractevent(topics = ["canceladm"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct CancelledAdminEvent {
     pub data: (),
 }
 
+/// Event emitted when the contract is initialized.
 #[contractevent(topics = ["init"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct InitializedEvent {
     pub admin: Address,
 }
 
+/// Event emitted when the contract is upgraded.
 #[contractevent(topics = ["upgrade"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when an upgrade is proposed.
 #[contractevent(topics = ["uppropose"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeProposedEvent {
     #[topic]
     pub new_wasm_hash: BytesN<32>,
     pub executable_at: u64,
 }
 
+/// Event emitted when a proposed upgrade is cancelled.
 #[contractevent(topics = ["upcancel"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeCancelledEvent {
     pub new_wasm_hash: BytesN<32>,
 }
 
+/// Event emitted when the upgrade delay is set.
 #[contractevent(topics = ["updelay"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct UpgradeDelaySetEvent {
     pub delay: u64,
 }
 
+/// Event emitted when an approver is added.
 #[contractevent(topics = ["apadd"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApproverAddedEvent {
     #[topic]
     pub approver: Address,
     pub data: (),
 }
 
+/// Event emitted when an approver is removed.
 #[contractevent(topics = ["aprem"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct ApproverRemovedEvent {
     #[topic]
     pub approver: Address,
     pub data: (),
 }
 
+/// Event emitted when an NGO's metadata URI is set or cleared.
 #[contractevent(topics = ["metadata"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct MetadataUriSetEvent {
     #[topic]
     pub owner: Address,
     pub metadata_uri: Option<String>,
 }
 
+/// Event emitted when a verification is renewed.
 #[contractevent(topics = ["renew"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct RenewedEvent {
     #[topic]
     pub owner: Address,
@@ -130,26 +173,34 @@ pub struct RenewedEvent {
     pub verified_until: u64,
 }
 
+/// Event emitted when the verification period is configured.
 #[contractevent(topics = ["verperiod"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct VerifyPeriodSetEvent {
     pub verify_period: u64,
 }
 
+/// Event emitted when an ownership transfer is proposed.
 #[contractevent(topics = ["ownprop"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct OwnershipProposedEvent {
     #[topic]
     pub current_owner: Address,
     pub new_owner: Address,
 }
 
+/// Event emitted when an ownership transfer is accepted.
 #[contractevent(topics = ["ownaccpt"], data_format = "vec")]
+#[allow(missing_docs)]
 pub struct OwnershipAcceptedEvent {
     #[topic]
     pub old_owner: Address,
     pub new_owner: Address,
 }
 
+/// Event emitted when an ownership transfer is cancelled.
 #[contractevent(topics = ["owncancel"], data_format = "single-value")]
+#[allow(missing_docs)]
 pub struct OwnershipCancelledEvent {
     #[topic]
     pub owner: Address,
@@ -157,12 +208,15 @@ pub struct OwnershipCancelledEvent {
 }
 
 #[contracttype]
-// Debug and PartialEq let tests assert_eq! on a try_* call’s full
+// Debug and PartialEq let tests assert_eq! on a try_* callâ€™s full
 // Result<Result<Ngo, _>, _> rather than unwrapping it by hand first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ngo {
+    /// The address that registered and owns this NGO entry.
     pub owner: Address,
+    /// The display name of the NGO, bounded by `MAX_NGO_NAME_LEN`.
     pub name: String,
+    /// Whether an admin or approver has approved this entry.
     pub verified: bool,
     /// Optional owner-supplied reference to off-chain metadata (a website,
     /// description, or logo), so an entry can be linked to what the NGO
@@ -180,6 +234,29 @@ pub struct Ngo {
     /// cleared by `accept_owner_transfer` or `cancel_owner_transfer`. `None` means
     /// no ownership transfer is pending.
     pub pending_owner: Option<Address>,
+}
+
+/// The verification state of an NGO owner address, returned by `verification_status`.
+///
+/// Distinguishes the five cases that `is_verified` collapses into a single
+/// `false`: an address that was never registered (`Unknown`), one that is
+/// registered but not yet reviewed (`Pending`), one that is currently
+/// verified and not expired (`Verified`), one whose verification period has
+/// lapsed (`Expired`), and one whose approval was explicitly revoked
+/// (`Revoked`). See issue #448.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VerificationStatus {
+    /// No entry exists for this address.
+    Unknown,
+    /// Registered but not yet approved or rejected.
+    Pending,
+    /// Approved and the verification has not expired.
+    Verified,
+    /// Was approved but the `verified_until` timestamp has passed.
+    Expired,
+    /// Approval was explicitly revoked by an admin or approver.
+    Revoked,
 }
 
 /// A single page of the NGO owners index, returned by `list_ngos_page`.
@@ -230,6 +307,10 @@ pub enum DataKey {
     /// Current number of verified NGO records, maintained by the review and
     /// removal entry points and read by `verified_count`.
     VerifiedCount,
+    /// Set when an NGO's approval is explicitly revoked. Cleared on
+    /// re-approval. Used by `verification_status` to distinguish `Revoked`
+    /// from `Pending`. See issue #448.
+    NgoRevoked(Address),
     /// The verification period in seconds applied to new approvals and to
     /// `renew_ngo`. `0` (the default) means approvals never expire. See
     /// `set_verify_period`.
@@ -247,9 +328,13 @@ pub enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// The registry has already been initialized and cannot be initialized again.
     AlreadyInitialized = 1,
+    /// The registry has not been initialized yet.
     NotInitialized = 2,
+    /// The owner address is already registered.
     AlreadyRegistered = 3,
+    /// The owner address is not registered.
     NotRegistered = 4,
     /// The NGO has already been approved: it can no longer be unregistered,
     /// renamed, rejected, or approved again. Revoke it first.
@@ -264,6 +349,7 @@ pub enum Error {
     NoPendingAdmin = 8,
     /// The proposed administrator is not a valid replacement.
     InvalidAdmin = 9,
+    /// An arithmetic operation overflowed or underflowed its type bounds.
     ArithmeticOverflow = 10,
     /// The supplied name is empty, contains only Unicode whitespace or invisible
     /// format characters, contains control characters, or is invalid UTF-8.
@@ -385,9 +471,6 @@ fn get_upgrade_delay(env: &Env) -> u64 {
         .get(&DataKey::UpgradeDelay)
         .unwrap_or(0)
 }
-        .get(&DataKey::VerifyPeriod)
-        .unwrap_or(0)
-}
 
 /// Returns whether a verification expiry has lapsed at the current ledger
 /// time. `None` never expires. An entry stays valid while
@@ -475,8 +558,8 @@ fn validate_name(name: &String) -> Result<(), Error> {
 ///
 /// `None` is always allowed. `Some` must be at most `MAX_METADATA_URI_LEN`
 /// (512 bytes) or the call fails with `Error::MetadataUriTooLong`. The URI is
-/// opaque to the contract — an `https://`, `ipfs://`, or any other scheme is
-/// accepted — so only the length is enforced. See issue #347.
+/// opaque to the contract â€” an `https://`, `ipfs://`, or any other scheme is
+/// accepted â€” so only the length is enforced. See issue #347.
 fn validate_metadata_uri(uri: &Option<String>) -> Result<(), Error> {
     if let Some(u) = uri {
         if u.len() > MAX_METADATA_URI_LEN {
@@ -564,6 +647,11 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
         )
     };
     env.storage().persistent().set(&key, &ngo);
+    // Clear any prior revocation flag so `verification_status` returns
+    // `Verified` rather than `Revoked` after a re-approval. See issue #448.
+    env.storage()
+        .persistent()
+        .remove(&DataKey::NgoRevoked(ngo_owner.clone()));
 
     let verified = get_verified_count(env);
     let new_verified = verified.checked_add(1).ok_or(Error::ArithmeticOverflow)?;
@@ -585,7 +673,7 @@ fn approve_registered_ngo(env: &Env, ngo_owner: Address) -> Result<(), Error> {
 /// shrinking the live counts. Shared by `unregister` (owner-initiated),
 /// `remove_ngo` (admin-initiated) and `reject_ngo` (reviewer-initiated); the
 /// caller is responsible for authorizing the call and for the
-/// verified/unverified check. Does not touch the instance TTL — the caller
+/// verified/unverified check. Does not touch the instance TTL â€” the caller
 /// decides whether to bump it. Decrements `NgoCount`, and `VerifiedCount` when
 /// the entry being removed was verified, using checked subtraction and
 /// returning `Error::ArithmeticOverflow` on underflow.
@@ -1026,7 +1114,7 @@ impl NgoRegistry {
     /// its clients); the contract keeps no record of it beyond the event.
     ///
     /// Returns `Error::NotRegistered` for an address with no entry. A verified
-    /// NGO cannot be rejected — an approval is undone with `revoke_ngo` first —
+    /// NGO cannot be rejected â€” an approval is undone with `revoke_ngo` first â€”
     /// and fails with `Error::AlreadyVerified`. An address that is neither the
     /// admin nor a listed approver fails with `Error::NotApprover`.
     ///
@@ -1114,11 +1202,7 @@ impl NgoRegistry {
             .set(&DataKey::Approvers, &approvers);
         extend_instance_ttl(&env);
 
-        ApproverAddedEvent {
-            approver,
-            data: (),
-        }
-        .publish(&env);
+        ApproverAddedEvent { approver, data: () }.publish(&env);
 
         Ok(())
     }
@@ -1165,11 +1249,7 @@ impl NgoRegistry {
             .set(&DataKey::Approvers, &remaining);
         extend_instance_ttl(&env);
 
-        ApproverRemovedEvent {
-            approver,
-            data: (),
-        }
-        .publish(&env);
+        ApproverRemovedEvent { approver, data: () }.publish(&env);
 
         Ok(())
     }
@@ -1339,7 +1419,7 @@ impl NgoRegistry {
     /// rename can be fixed without going through an admin. Requires the
     /// owner's auth. Fails with `Error::NotRegistered` for an address with
     /// no entry, and `Error::AlreadyVerified` once an admin has approved
-    /// it — the name an admin approved is the name that stays.
+    /// it â€” the name an admin approved is the name that stays.
     ///
     /// The new name must meet the same validation rules as in `register`: at most
     /// 200 bytes, valid UTF-8, at least one visible character, and no control characters.
@@ -1394,8 +1474,8 @@ impl NgoRegistry {
     /// or logo. Requires the owner's auth; the entry must already be
     /// registered, or the call fails with `Error::NotRegistered`.
     ///
-    /// The URI is opaque to the contract — any scheme (`https://`, `ipfs://`,
-    /// …) is accepted — and must be at most `MAX_METADATA_URI_LEN` (512 bytes),
+    /// The URI is opaque to the contract â€” any scheme (`https://`, `ipfs://`,
+    /// â€¦) is accepted â€” and must be at most `MAX_METADATA_URI_LEN` (512 bytes),
     /// or the call fails with `Error::MetadataUriTooLong`. Pass `None` to clear
     /// it. Unlike `update_name`, this is not locked by verification: an NGO can
     /// keep its published metadata current after approval. Publishes a
@@ -1443,7 +1523,11 @@ impl NgoRegistry {
             extend_instance_ttl(&env);
             extend_ngo_ttl(&env, &owner);
 
-            MetadataUriSetEvent { owner, metadata_uri }.publish(&env);
+            MetadataUriSetEvent {
+                owner,
+                metadata_uri,
+            }
+            .publish(&env);
         }
 
         Ok(())
@@ -1543,6 +1627,59 @@ impl NgoRegistry {
         Self::get_ngo(env, owner)
             .map(|ngo| ngo.verified)
             .unwrap_or(false)
+    }
+
+    /// Returns the detailed verification state of `owner`, distinguishing the
+    /// five cases that `is_verified` collapses into a single `false`:
+    /// `Unknown` (no entry), `Pending` (registered, not yet reviewed),
+    /// `Verified` (approved and not expired), `Expired` (approved but
+    /// `verified_until` has passed), and `Revoked` (approval was explicitly
+    /// revoked). Never errors or panics. See issue #448.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    /// # use ngo_registry::{NgoRegistry, NgoRegistryArgs, NgoRegistryClient, VerificationStatus};
+    /// # let env = Env::default();
+    /// # env.mock_all_auths();
+    /// # let admin = Address::generate(&env);
+    /// # let contract_id = env.register(NgoRegistry, NgoRegistryArgs::__constructor(&admin));
+    /// # let client = NgoRegistryClient::new(&env, &contract_id);
+    /// let owner = Address::generate(&env);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Unknown);
+    ///
+    /// client.register(&owner, &String::from_str(&env, "Example NGO"));
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Pending);
+    ///
+    /// client.approve_ngo(&admin, &owner);
+    /// assert_eq!(client.verification_status(&owner), VerificationStatus::Verified);
+    /// ```
+    pub fn verification_status(env: Env, owner: Address) -> VerificationStatus {
+        let ngo: Ngo = match env.storage().persistent().get(&DataKey::Ngo(owner.clone())) {
+            Some(n) => n,
+            None => return VerificationStatus::Unknown,
+        };
+
+        if ngo.verified {
+            if has_expired(&env, ngo.verified_until) {
+                return VerificationStatus::Expired;
+            }
+            return VerificationStatus::Verified;
+        }
+
+        // verified == false: distinguish Revoked from Pending via the flag
+        // set by revoke_ngo and cleared by approve_registered_ngo.
+        let revoked: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NgoRevoked(owner))
+            .unwrap_or(false);
+        if revoked {
+            VerificationStatus::Revoked
+        } else {
+            VerificationStatus::Pending
+        }
     }
 
     /// Reads back the total number of registered NGOs.
@@ -1728,11 +1865,7 @@ impl NgoRegistry {
     ///
     /// client.batch_approve(&admin, &vec![&env, a, b]);
     /// ```
-    pub fn batch_approve(
-        env: Env,
-        approver: Address,
-        owners: Vec<Address>,
-    ) -> Result<(), Error> {
+    pub fn batch_approve(env: Env, approver: Address, owners: Vec<Address>) -> Result<(), Error> {
         require_approver(&env, &approver)?;
         for ngo_owner in owners.iter() {
             approve_registered_ngo(&env, ngo_owner)?;
@@ -1784,6 +1917,11 @@ impl NgoRegistry {
         // doesn't carry a stale timestamp (#348).
         ngo.verified_until = None;
         env.storage().persistent().set(&key, &ngo);
+        // Mark as revoked so `verification_status` can distinguish this from
+        // a pending (never-approved) entry. See issue #448.
+        env.storage()
+            .persistent()
+            .set(&DataKey::NgoRevoked(ngo_owner.clone()), &true);
 
         let verified = get_verified_count(&env);
         let new_verified = verified.checked_sub(1).ok_or(Error::ArithmeticOverflow)?;
@@ -1801,7 +1939,7 @@ impl NgoRegistry {
         Ok(())
     }
 
-    /// Extends a lapsed — or still-valid — verification by the configured
+    /// Extends a lapsed â€” or still-valid â€” verification by the configured
     /// period, moving its `verified_until` forward from the current ledger
     /// time. Admin-only.
     ///
@@ -1874,7 +2012,7 @@ impl NgoRegistry {
     }
 
     /// Bumps a registered NGO entry's storage TTL without changing
-    /// anything about it. Callable by anyone — a verified NGO that
+    /// anything about it. Callable by anyone â€” a verified NGO that
     /// `register`, `approve_ngo`, and `revoke_ngo` haven't touched in a
     /// while would otherwise have its entry archived after 90 days, with
     /// no other way to keep it alive.
@@ -2192,4 +2330,6 @@ impl NgoRegistry {
     }
 }
 
+#[cfg(test)]
+#[cfg(test)]
 mod test;
