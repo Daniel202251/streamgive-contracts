@@ -12,6 +12,10 @@ This project does not yet follow a formal versioning scheme — each contract's
 
 ### Added
 
+- `ngo-registry`: admin-gated `pause_registrations` / `resume_registrations`
+  switch and `registrations_paused` view to block new `register` calls with
+  `Error::RegistrationsPaused` (code 16) while keeping all other entry points
+  operational. Emits `regrpause` and `regresume` events.
 - `donation-vault`: bounded `cancel_streams` entry point so a donor can cancel
   several streams in one transaction, with one authorization and one refund
   per stream. Rejects foreign or already-cancelled streams and is
