@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(test)]
 
+mod tests;
 use super::*;
 use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{
